@@ -71,15 +71,19 @@ apache-druid-kustomize/
     │   ├── postgres.env               # PostgreSQL credentials (.gitignored)
     │   ├── postgres.env.example       # Credentials template (tracked in git)
     │   └── patches/
-    │       ├── replicas.yaml          # Indexer replicas = 2
-    │       ├── jvm-heaps.yaml         # Per-component JVM heap sizes
-    │       ├── k8s-resources.yaml     # K8s requests / limits
-    │       ├── pvc-patch.yaml         # PVC sizes (storageClassName override)
+    │       ├── replicas.yaml                          # Indexer replicas = 2
+    │       ├── jvm-heaps.yaml                         # Per-component JVM heap sizes
+    │       ├── k8s-resources.yaml                     # K8s requests / limits
+    │       ├── overlord-configmap-patch.yaml          # Task history: local → metadata (PostgreSQL)
+    │       ├── pvc-patch.yaml                         # PVC sizes (storageClassName override)
     │       ├── druid-common-config-with-minio.yaml    # ← active storage backend
-    │       ├── druid-common-config-with-aws-s3.yaml   # (choose one)
+    │       ├── druid-common-config-with-aws-s3.yaml   #   (enable exactly one)
     │       ├── druid-common-config-with-azure.yaml
     │       ├── druid-common-config-with-gcs.yaml
     │       ├── druid-common-config-with-hdfs.yaml
+    │       ├── druid-common-config-with-aliyun-oss.yaml
+    │       ├── druid-common-config-with-cloudfiles.yaml
+    │       ├── druid-common-config-with-cassandra.yaml
     │       └── statefulsets-with-aws-region.yaml      # S3/MinIO: AWS_REGION injection
     └── <your-cluster>/                # Your custom overlay — gitignored
         └── (copy of apache-druid-37.0.0, edit as needed)
@@ -294,7 +298,7 @@ env:
 | `POD_NAMESPACE` | base | Specifies the namespace when calling the Kubernetes API | Cross-namespace misbehavior |
 | `POD_IP` | base | Injected as the `druid_host` value — used by Druid to advertise its cluster address | Falls back to hostname → inter-component communication fails |
 | `druid_host` | base | Overrides the `druid.host` setting via env | — |
-| `AWS_REGION` | **S3 component only** | Used by the AWS SDK to resolve the S3 endpoint region | S3/MinIO connection may fail |
+| `AWS_REGION` | **overlay patch only** | Used by the AWS SDK to resolve the S3 endpoint region | S3/MinIO connection may fail |
 
 **Why `druid_host=$(POD_IP)` is required:**
 
@@ -307,13 +311,13 @@ With POD_IP:   10.233.102.5    → direct communication works ✅
 
 > This issue was discovered during a Druid 37.0.0 upgrade when all inter-pod communication failed.
 
-**Why `AWS_REGION` is in the S3 component only, not in base:**
+**Why `AWS_REGION` is not in base:**
 
 Environments that don't use S3/MinIO (local emptyDir, Azure, GCS, etc.) don't need `AWS_REGION`.  
-When `components/storage/s3` is enabled, Kustomize automatically injects it into all StatefulSets.
+When using S3 or MinIO, enable the overlay patch that injects it into all StatefulSets:
 
-```
-# components/storage/s3/statefulset-env-patch.yaml
+```yaml
+# overlays/<your-cluster>/patches/statefulsets-with-aws-region.yaml
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
@@ -358,12 +362,7 @@ spec:
             storage: 50Gi           # override size
 ```
 
-### `components/storage/{backend}/patch.yaml`
-
-Replaces the entire `common.runtime.properties` key in `druid-common-config`.  
-Contains the extensions and settings appropriate for each storage backend.
-
-### `overlays/apache-druid-37.0.0/patches/replicas.yaml`
+### `overlays/<your-cluster>/patches/replicas.yaml`
 
 ```yaml
 apiVersion: apps/v1
@@ -1453,7 +1452,7 @@ kubectl exec druid-indexers-0 -- curl -v http://<MINIO_HOST>:9000/druid
 | Bucket not found | `druid` bucket not created in MinIO | Create the bucket in the MinIO console |
 
 ```properties
-# Required settings in components/storage/s3/patch.yaml
+# overlays/<your-cluster>/patches/druid-common-config-with-minio.yaml
 druid.s3.endpoint.url=http://<MINIO_HOST>:9000
 druid.s3.enablePathStyleAccess=true
 druid.s3.forceGlobalBucketAccessEnabled=false

@@ -71,15 +71,19 @@ apache-druid-kustomize/
     │   ├── postgres.env               # PostgreSQL 자격증명 (.gitignored)
     │   ├── postgres.env.example       # 자격증명 템플릿 (git 관리)
     │   └── patches/
-    │       ├── replicas.yaml          # Indexer replicas = 2
-    │       ├── jvm-heaps.yaml         # 각 컴포넌트 JVM heap 크기
-    │       ├── k8s-resources.yaml     # K8s requests / limits
-    │       ├── pvc-patch.yaml         # PVC 크기 (StorageClass 재정의)
+    │       ├── replicas.yaml                          # Indexer replicas = 2
+    │       ├── jvm-heaps.yaml                         # 각 컴포넌트 JVM heap 크기
+    │       ├── k8s-resources.yaml                     # K8s requests / limits
+    │       ├── overlord-configmap-patch.yaml          # Task 이력: local → metadata (PostgreSQL)
+    │       ├── pvc-patch.yaml                         # PVC 크기 (StorageClass 재정의)
     │       ├── druid-common-config-with-minio.yaml    # ← 현재 활성 스토리지
-    │       ├── druid-common-config-with-aws-s3.yaml   # (하나만 활성화)
+    │       ├── druid-common-config-with-aws-s3.yaml   #   (하나만 활성화)
     │       ├── druid-common-config-with-azure.yaml
     │       ├── druid-common-config-with-gcs.yaml
     │       ├── druid-common-config-with-hdfs.yaml
+    │       ├── druid-common-config-with-aliyun-oss.yaml
+    │       ├── druid-common-config-with-cloudfiles.yaml
+    │       ├── druid-common-config-with-cassandra.yaml
     │       └── statefulsets-with-aws-region.yaml      # S3/MinIO: AWS_REGION 주입
     └── <your-cluster>/                # 사용자 overlay — gitignored
         └── (apache-druid-37.0.0 복사 후 필요한 부분만 수정)
@@ -294,7 +298,7 @@ env:
 | `POD_NAMESPACE` | base | Kubernetes API 호출 시 namespace 특정 | cross-namespace 오동작 |
 | `POD_IP` | base | `druid_host` 값으로 주입 — Druid가 클러스터 내 자신의 주소를 알리는 데 사용 | hostname으로 fallback → 통신 실패 |
 | `druid_host` | base | `druid.host` 설정을 env로 override | — |
-| `AWS_REGION` | **S3 component만** | AWS SDK가 S3 엔드포인트 리전 결정에 사용 | S3/MinIO 연결 실패 가능 |
+| `AWS_REGION` | **overlay patch만** | AWS SDK가 S3 엔드포인트 리전 결정에 사용 | S3/MinIO 연결 실패 가능 |
 
 **`druid_host=$(POD_IP)`가 필요한 이유:**
 
@@ -307,13 +311,13 @@ POD_IP 사용 시:  10.233.102.5    → 직접 통신 가능 ✅
 
 > 이 문제는 Druid 37.0.0 업그레이드 중 전체 Pod 간 통신 실패로 발견됐습니다.
 
-**`AWS_REGION`은 base에 없고 S3 component에만 존재하는 이유:**
+**`AWS_REGION`이 base에 없는 이유:**
 
 S3/MinIO를 사용하지 않는 환경(local emptyDir, Azure, GCS 등)에는 `AWS_REGION`이 불필요합니다.  
-`components/storage/s3`를 활성화하면 Kustomize가 모든 StatefulSet에 자동으로 주입합니다.
+S3/MinIO를 사용할 때는 overlay patch를 활성화하면 모든 StatefulSet에 자동으로 주입됩니다:
 
-```
-# components/storage/s3/statefulset-env-patch.yaml
+```yaml
+# overlays/<your-cluster>/patches/statefulsets-with-aws-region.yaml
 - op: add
   path: /spec/template/spec/containers/0/env/-
   value:
@@ -358,12 +362,7 @@ spec:
             storage: 50Gi           # 크기 재정의
 ```
 
-### `components/storage/{backend}/patch.yaml`
-
-`druid-common-config`의 `common.runtime.properties` 전체를 교체합니다.  
-각 스토리지 백엔드에 맞는 extension과 설정이 포함되어 있습니다.
-
-### `overlays/apache-druid-37.0.0/patches/replicas.yaml`
+### `overlays/<your-cluster>/patches/replicas.yaml`
 
 ```yaml
 apiVersion: apps/v1
@@ -614,55 +613,80 @@ patches:
 
 ## 5. 스토리지 컴포넌트 선택
 
-`overlays/apache-druid-37.0.0/kustomization.yaml`에서 한 줄만 변경합니다:
+`base/`와 `components/`는 읽기 전용 참조 템플릿으로 유지합니다.  
+환경별 설정값은 모두 overlay patch 파일에서 관리합니다 — component 파일을 직접 수정하지 않습니다.
+
+### PVC 선택 (3단계)
+
+| 구성 | 결과 |
+|------|------|
+| `components/pvc` 없음 | `emptyDir` — 로컬 디스크, Pod 재시작 시 데이터 유실 |
+| `components/pvc` 있음 | 클러스터 기본 StorageClass로 PVC 생성 |
+| `components/pvc` + `patches/pvc-patch.yaml` | StorageClass / 크기를 overlay에서 재정의 |
+
+### 딥 스토리지 백엔드 선택
+
+`overlays/<your-cluster>/kustomization.yaml`에서 하나만 활성화합니다:
 
 ```yaml
-components:
-  - ../../components/pvc              # PVC 사용 여부 (제거 시 emptyDir 유지)
-
+patches:
   # 아래 중 하나만 활성화 ↓
-  - ../../components/storage/s3       # ✅ 현재 사용 중 (MinIO)
-  # - ../../components/storage/azure
-  # - ../../components/storage/gcs
-  # - ../../components/storage/hdfs
-  # - ../../components/storage/aliyun-oss
-  # - ../../components/storage/cloudfiles
-  # - ../../components/storage/cassandra
+  - path: patches/druid-common-config-with-minio.yaml       # ✅ 현재 활성
+  # - path: patches/druid-common-config-with-aws-s3.yaml
+  # - path: patches/druid-common-config-with-azure.yaml
+  # - path: patches/druid-common-config-with-gcs.yaml
+  # - path: patches/druid-common-config-with-hdfs.yaml
+  # - path: patches/druid-common-config-with-aliyun-oss.yaml
+  # - path: patches/druid-common-config-with-cloudfiles.yaml
+  # - path: patches/druid-common-config-with-cassandra.yaml
+
+  # S3 / MinIO 사용 시 활성화 ↓
+  - path: patches/statefulsets-with-aws-region.yaml
+    target:
+      kind: StatefulSet
 ```
 
 ### 스토리지별 필수 설정값
 
-각 `components/storage/{backend}/patch.yaml`에서 `<...>` 플레이스홀더를 교체합니다.
+각 `overlays/<your-cluster>/patches/druid-common-config-with-*.yaml`에서 `<...>` 플레이스홀더를 교체합니다.
 
-**S3 / MinIO** (`components/storage/s3/patch.yaml`)
+**MinIO** (`patches/druid-common-config-with-minio.yaml`)
 ```properties
-druid.s3.accessKey=<S3_ACCESS_KEY>
-druid.s3.secretKey=<S3_SECRET_KEY>
-druid.s3.endpoint.url=<S3_ENDPOINT_URL>   # AWS S3라면 이 줄 제거
-druid.s3.enablePathStyleAccess=true        # MinIO 필수 / AWS S3는 false
+druid.s3.accessKey=<MINIO_ACCESSKEY>
+druid.s3.secretKey=<MINIO_SECRETKEY>
+druid.s3.endpoint.url=http://<MINIO-ENDPOINT>
+druid.s3.enablePathStyleAccess=true
 ```
 
-**Azure Blob** (`components/storage/azure/patch.yaml`)
+**AWS S3** (`patches/druid-common-config-with-aws-s3.yaml`)
+```properties
+druid.s3.accessKey=<AWS_ACCESSKEY>
+druid.s3.secretKey=<AWS_SECRETKEY>
+druid.storage.bucket=<APACHE-DRUID-BUCKET>
+# patches/statefulsets-with-aws-region.yaml에서 AWS_REGION도 설정
+```
+
+**Azure Blob** (`patches/druid-common-config-with-azure.yaml`)
 ```properties
 druid.azure.account=<AZURE_STORAGE_ACCOUNT>
 druid.azure.key=<AZURE_STORAGE_KEY>
 druid.azure.container=druid
 ```
 
-**GCS** (`components/storage/gcs/patch.yaml`)
+**GCS** (`patches/druid-common-config-with-gcs.yaml`)
 ```properties
 druid.google.bucket=<GCS_BUCKET>
 # Workload Identity 사용 시 key 불필요
 # 명시적 key: druid.google.jsonCredentials=<JSON_KEY_PATH>
 ```
 
-**HDFS** (`components/storage/hdfs/patch.yaml`)
+**HDFS** (`patches/druid-common-config-with-hdfs.yaml`)
 ```properties
 druid.storage.storageDirectory=hdfs://<NAMENODE_HOST>:9000/druid/segments
 ```
 > ⚠️ `hdfs-site.xml`, `core-site.xml`을 별도 ConfigMap으로 마운트해야 합니다.
 
-**Aliyun OSS** (`components/storage/aliyun-oss/patch.yaml`)
+**Aliyun OSS** (`patches/druid-common-config-with-aliyun-oss.yaml`)
 ```properties
 druid.oss.accessKey=<OSS_ACCESS_KEY>
 druid.oss.secretKey=<OSS_SECRET_KEY>
@@ -670,7 +694,7 @@ druid.oss.endpoint=<OSS_ENDPOINT>         # 예: oss-cn-hangzhou.aliyuncs.com
 druid.storage.oss.bucket=<OSS_BUCKET>
 ```
 
-**Cassandra** (`components/storage/cassandra/patch.yaml`)
+**Cassandra** (`patches/druid-common-config-with-cassandra.yaml`)
 > ⚠️ 커뮤니티 확장, 공식 문서 미비. 사용 전 Cassandra keyspace 스키마를 직접 생성해야 합니다.
 
 ### 지원 스토리지 요약
@@ -902,9 +926,10 @@ Kustomize의 `Component`(kind: Component)는 overlay와 달리
 overlays/apache-druid-38.0.0/kustomization.yaml
   resources: [../../base]
   components:
-    - ../../components/pvc
-    - ../../components/storage/s3   ← 동일 컴포넌트 재사용
+    - ../../components/pvc                    ← 구조 변환만 (emptyDir → PVC)
   patches:
+    - patches/pvc-patch.yaml                  ← StorageClass / 크기 (필요 시)
+    - patches/druid-common-config-with-minio.yaml  ← 스토리지 자격증명
     - 38.0.0 전용 변경사항만
 ```
 
@@ -1423,7 +1448,7 @@ kubectl exec druid-indexers-0 -- curl -v http://<MINIO_HOST>:9000/druid
 | 버킷 없음 | MinIO에 `druid` 버킷 미생성 | MinIO 콘솔에서 버킷 생성 |
 
 ```properties
-# components/storage/s3/patch.yaml 필수 설정
+# overlays/<your-cluster>/patches/druid-common-config-with-minio.yaml
 druid.s3.endpoint.url=http://<MINIO_HOST>:9000
 druid.s3.enablePathStyleAccess=true
 druid.s3.forceGlobalBucketAccessEnabled=false
