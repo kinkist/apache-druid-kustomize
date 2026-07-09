@@ -322,11 +322,17 @@ S3/MinIO를 사용할 때는 overlay patch를 활성화하면 모든 StatefulSet
   path: /spec/template/spec/containers/0/env/-
   value:
     name: AWS_REGION
-    value: "us-east-1"   # MinIO는 값 무관, AWS S3는 버킷 리전으로 변경
+    value: "us-east-1"   # MinIO: 임의 값 가능 / AWS S3: 버킷 리전과 일치해야 함
 ```
 
-MinIO 사용 시 `AWS_REGION` 값은 무관합니다(`druid.s3.endpoint.url`로 엔드포인트를 직접 지정하기 때문).  
-실제 AWS S3 사용 시에는 버킷이 있는 리전(예: `ap-northeast-2`)으로 변경해야 합니다.
+`AWS_REGION`은 MinIO와 AWS S3 모두 **필수 설정**입니다.
+
+**리전이 필수가 된 배경:**
+- **Druid 0.13.0**: `jets3t` 라이브러리를 공식 AWS SDK for Java v1으로 교체([PR #5382](https://github.com/apache/druid/pull/5382)). jets3t는 리전을 암묵적으로 처리했으나 AWS SDK v1부터는 명시적 리전 설정이 필수가 됐습니다.
+- **Druid 37.0.0**: AWS SDK v1(EOL) → **v2.40.0** 으로 업그레이드([PR #18891](https://github.com/apache/druid/pull/18891)). AWS SDK v2에서도 리전 명시가 강제됩니다.
+
+- **MinIO**: 임의 값이면 동작합니다 — SDK는 실제 연결 시 `druid.s3.endpoint.url`을 사용하므로 리전 값으로 라우팅하지 않습니다.
+- **AWS S3**: 버킷이 있는 리전과 반드시 일치해야 합니다 (예: `ap-northeast-2`).
 
 ### `components/pvc/kustomization.yaml`
 

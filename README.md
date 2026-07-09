@@ -322,11 +322,17 @@ When using S3 or MinIO, enable the overlay patch that injects it into all Statef
   path: /spec/template/spec/containers/0/env/-
   value:
     name: AWS_REGION
-    value: "us-east-1"   # Any value works for MinIO / set to your bucket region for AWS S3
+    value: "us-east-1"   # MinIO: any value works / AWS S3: must match your bucket region
 ```
 
-The `AWS_REGION` value is irrelevant for MinIO (the endpoint is set explicitly via `druid.s3.endpoint.url`).  
-For actual AWS S3, change this to the bucket's region (e.g., `ap-northeast-2`).
+`AWS_REGION` is **required** by the AWS SDK for both MinIO and AWS S3.
+
+**Background — why region became mandatory:**
+- **Druid 0.13.0**: replaced the `jets3t` library with the official AWS SDK for Java v1 ([PR #5382](https://github.com/apache/druid/pull/5382)). The AWS SDK v1 requires an explicit region; the old jets3t library handled this implicitly.
+- **Druid 37.0.0**: upgraded from AWS SDK v1 (EOL) to **v2.40.0** ([PR #18891](https://github.com/apache/druid/pull/18891)). AWS SDK v2 also enforces an explicit region.
+
+- **MinIO**: any non-empty value is accepted — the SDK uses `druid.s3.endpoint.url` for the actual connection, ignoring the region for routing.
+- **AWS S3**: must match the region where the bucket resides (e.g., `ap-northeast-2`).
 
 ### `components/pvc/kustomization.yaml`
 
