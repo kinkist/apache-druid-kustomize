@@ -26,7 +26,8 @@ data:
     druid.storage.type=oss
     druid.oss.accessKey=<OSS_ACCESS_KEY>
     druid.oss.secretKey=<OSS_SECRET_KEY>
-    druid.oss.endpoint=<OSS_ENDPOINT>         # e.g. oss-cn-hangzhou.aliyuncs.com
+    # e.g. oss-cn-hangzhou.aliyuncs.com
+    druid.oss.endpoint=<OSS_ENDPOINT>
     druid.storage.oss.bucket=<OSS_BUCKET>
     druid.storage.oss.prefix=druid/segments
 

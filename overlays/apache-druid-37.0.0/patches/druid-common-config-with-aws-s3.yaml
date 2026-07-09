@@ -1,12 +1,10 @@
 # AWS S3 credentials — overlay-level override
-# Overrides components/storage/s3/patch.yaml without touching the component.
 #
 # Usage:
 #   1. Fill in AWS_ACCESSKEY, AWS_SECRETKEY, APACHE-DRUID-BUCKET
-#   2. Set AWS_REGION in components/storage/s3/statefulset-env-patch.yaml
-#      to the region where your bucket lives (e.g. ap-northeast-2)
+#   2. Set druid.s3.endpoint.signingRegion to the region where your bucket lives (e.g. ap-northeast-2)
 #   3. Register in kustomization.yaml patches:
-#        - path: patches/druid-common-config-patch-aws-s3.yaml
+#        - path: patches/druid-common-config-with-aws-s3.yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -34,6 +32,8 @@ data:
     druid.storage.baseKey=segments
     druid.s3.accessKey=AWS_ACCESSKEY
     druid.s3.secretKey=AWS_SECRETKEY
+    # Must match the region where your S3 bucket lives (e.g. ap-northeast-2)
+    druid.s3.endpoint.signingRegion=<BUCKET_REGION>
     druid.s3.enablePathStyleAccess=false
     druid.s3.forceGlobalBucketAccessEnabled=false
 

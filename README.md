@@ -10,15 +10,15 @@
 ## Table of Contents
 
 1. [Infrastructure](#1-infrastructure)
-2. [Full Kustomize Structure](#2-full-kustomize-structure)
-3. [Usage (Quick Start)](#3-usage-quick-start)
-4. [File Descriptions](#4-file-descriptions)
-5. [Storage Component Selection](#5-storage-component-selection)
-6. [Key Design Decisions](#6-key-design-decisions)
-7. [Known Issues](#7-known-issues) (7-5: Jetty 12 Router thread shortage included)
-8. [Troubleshooting Guide](#8-troubleshooting-guide)
-9. [Kafka Configuration Reference](#9-kafka-configuration-reference)
-10. [Druid Architecture — Component Roles and Data Flow](#10-druid-architecture--component-roles-and-data-flow)
+2. [Druid Architecture — Component Roles and Data Flow](#2-druid-architecture--component-roles-and-data-flow)
+3. [Full Kustomize Structure](#3-full-kustomize-structure)
+7. [Key Design Decisions](#7-key-design-decisions)
+4. [Usage (Quick Start)](#4-usage-quick-start)
+5. [File Descriptions](#5-file-descriptions)
+6. [Storage Component Selection](#6-storage-component-selection)
+8. [Known Issues](#8-known-issues) (8-5: Jetty 12 Router thread shortage included)
+9. [Troubleshooting Guide](#9-troubleshooting-guide)
+10. [Kafka Configuration Reference](#10-kafka-configuration-reference)
 
 ---
 
@@ -35,11 +35,374 @@
 | Indexer | 8091 | 1 | Kafka ingest + Task execution (JVM thread model) |
 | Router | 8888 | 1 | UI / API Gateway |
 
-> Setting Indexer to 2 replicas creates an HA configuration. See [6-3. Indexer HA Setup](#6-3-indexer-ha-setup-replicas2) for details.
+> Setting Indexer to 2 replicas creates an HA configuration. See [7-3. Indexer HA Setup](#7-3-indexer-ha-setup-replicas2) for details.
 
 ---
 
-## 2. Full Kustomize Structure
+
+## 2. Druid Architecture — Component Roles and Data Flow
+
+### 2-1. Component Roles
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        Query / Ingest                           │
+│                                                                 │
+│   Client ──→ Router ──→ Broker ──→ Historical                   │
+│                    └──→ Overlord ──→ Indexer (real-time segs)   │
+│                    └──→ Coordinator                             │
+│                                                                 │
+│                  [PostgreSQL: metadata]                         │
+│                  [S3/MinIO: Deep Storage]                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+| Component | Port | Role |
+|-----------|------|------|
+| **Coordinator** | 8081 | Segment distribution management. Instructs Historical nodes on which segments to load/drop. Manages retention policies and auto-compaction |
+| **Overlord** | 8090 | Task lifecycle management. Creates/terminates Supervisors, assigns Tasks to Indexers, records task status in the metadata DB |
+| **Broker** | 8082 | Query router. Inspects the segment timeline to distribute sub-queries to Historical/Indexer nodes, then merges and returns the result |
+| **Historical** | 8083 | Immutable segment serving. Downloads segments from Deep Storage, caches them locally, and responds to queries |
+| **Indexer** | 8091 | Ingest task execution (JVM thread model). Real-time indexing of new data and segment upload to Deep Storage |
+| **Router** | 8888 | API gateway + web console. Proxies queries to Broker, Task API to Overlord, segment API to Coordinator |
+
+#### Component Data Stores
+
+| Store | Role | In this deployment |
+|-------|------|-------------------|
+| **Deep Storage** | Permanent storage for segment files (.smoosh) | S3/MinIO (`druid` bucket) |
+| **Metadata Store** | Segment registry, task history, Supervisor state | PostgreSQL (`druid-postgresql:5432`) |
+| **Local Cache** | Segments downloaded by Historical for serving | PVC (`/opt/druid/var`) |
+
+---
+
+### 2-2. Kafka → Druid Ingestion Flow
+
+```
+Kafka Topic
+  │
+  │  (1) Supervisor assigns partitions
+  ▼
+Indexer Task (real-time consumption)
+  │  · Reads messages via Kafka Consumer
+  │  · Adds rows to in-memory Incremental Index
+  │  · On taskDuration (default 1h) or row count threshold → Publish
+  │
+  │  (2) Publish phase
+  ├──▶ Uploads segment file to Deep Storage (S3)
+  ├──▶ Registers segment in PostgreSQL metadata DB
+  └──▶ New Task picks up from the next Kafka offset
+         │
+         │  (3) Coordinator detects
+         ▼
+     Historical Node
+       · Downloads segment from S3 → local cache
+       · Subsequent queries answered by Historical
+```
+
+#### Supervisor State Machine
+
+```
+PENDING ──▶ RUNNING ──▶ SUSPENDED
+                │             │
+                ▼             ▼
+            STOPPING      RUNNING (on resume)
+                │
+                ▼
+           UNHEALTHY (on consecutive Task failures)
+```
+
+```bash
+# List Supervisors and their status
+curl -s http://localhost:8090/druid/indexer/v1/supervisor | python3 -m json.tool
+
+# Detailed status of a specific Supervisor
+curl -s http://localhost:8090/druid/indexer/v1/supervisor/<id>/status
+
+# Kafka offset consumption (per-partition lag)
+curl -s http://localhost:8090/druid/indexer/v1/supervisor/<id>/stats
+```
+
+#### Supervisor Parameters: taskCount vs replicas
+
+The two parameters serve **different purposes**.
+
+| Parameter | Role | Effect |
+|-----------|------|--------|
+| `taskCount` | Split partitions for parallel processing | **Throughput ↑** |
+| `replicas` | Duplicate processing of the same data | **High availability (HA) ↑** |
+
+**Behavior per configuration**
+
+| Config | Task count | Partition distribution | Effect |
+|--------|-----------|----------------------|--------|
+| `taskCount=1, replicas=2` (current) | 2 | Each Task consumes all of P0,P1,P2 | HA (fault tolerance) |
+| `taskCount=2, replicas=1` | 2 | Task-A → P0,P1 / Task-B → P2 | 2× throughput |
+| `taskCount=2, replicas=2` | 4 | Above config with a replica for each | HA + 2× throughput |
+
+**Current configuration (taskCount=1, replicas=2) — HA behavior**
+
+```
+Kafka Topic (partition 0, 1, 2)
+           │
+     ┌─────┴─────┐
+     │  Overlord  │  ← Supervisor creates and manages 2 Tasks
+     └─────┬─────┘
+     ┌─────┴──────────────────┐
+     ▼                        ▼
+  Task-A                   Task-B
+(consumes P0, P1, P2)   (consumes P0, P1, P2)
+     │                        │
+druid-indexers-0         druid-indexers-1
+
+Task-A fails
+  → Task-B immediately resumes from last committed offset (no data loss)
+  → Supervisor reassigns a new Task-A to druid-indexers-0
+  → Both Tasks resume simultaneous consumption (HA restored)
+```
+
+**Throughput scaling (taskCount=2, replicas=1)**
+
+```
+Kafka Topic (partition 0, 1, 2)
+           │
+     ┌─────┴─────┐
+     │  Overlord  │  ← Supervisor creates 2 Tasks
+     └─────┬─────┘
+     ┌─────┴──────────────────┐
+     ▼                        ▼
+  Task-A                   Task-B
+(handles P0, P1)          (handles P2)
+     │                        │
+druid-indexers-0         druid-indexers-1
+```
+
+> `taskCount` cannot exceed the number of Kafka partitions. With 3 partitions, `taskCount` max is 3.
+
+```json
+// Example: throughput + HA simultaneously (3 partitions, 6 Tasks)
+"taskCount": 3,
+"replicas": 2
+```
+
+#### Supervisor Task States: active vs publishing
+
+On the Supervisor screen, you may see both states simultaneously:
+
+```
+(1 task × 2 replicas)
+2 active tasks
+2 publishing tasks
+```
+
+These two states represent **different generations of tasks**.
+
+| State | What it does | Kafka reads | Deep storage upload |
+|-------|-------------|-------------|---------------------|
+| **active** | Actively consuming Kafka partitions | ✅ continuously reading | ❌ |
+| **publishing** | Finalizing/pushing segments | ❌ reading stopped | ✅ in progress |
+
+**Task lifecycle:**
+
+```
+[active]  reading data from Kafka
+    ↓  segment granularity boundary reached or task.duration expired
+[publishing]  Kafka reading stops → segments merged → pushed to deep storage → metadata registered
+    ↓  complete
+[done]  Historical loads segment → queryable
+```
+
+When an active task reaches a segment boundary:
+1. The task transitions to **publishing** state (starts pushing to S3/MinIO)
+2. Supervisor **immediately creates a new active task** — no gap in Kafka reads
+3. When the publishing task completes, Historical loads the segment
+
+So `2 active + 2 publishing` is **normal**. The previous generation is completing its push while the new generation is already reading from Kafka.
+
+---
+
+### 2-3. Query Execution Flow
+
+```
+Client (SQL / Native JSON)
+  │
+  ▼
+Router :8888
+  │  · queries → proxied to Broker
+  │  · Task API → proxied to Overlord
+  │
+  ▼
+Broker :8082
+  │  (1) Query segment timeline
+  │      · caches "which Historical holds which segments" from Coordinator
+  │      · caches "real-time segment range" from Indexer
+  │
+  │  (2) Distribute sub-queries
+  ├──▶ Historical :8083  (published segments)
+  └──▶ Indexer :8091    (real-time segments not yet published)
+         │
+         │  (3) Each node returns partial results from its segments
+         ▼
+Broker (4) Merges partial results → applies final aggregation/sort/LIMIT
+  │
+  ▼
+Client ← final response
+```
+
+#### Segment Selection Criteria for Queries
+
+```
+Query: SELECT ... WHERE __time BETWEEN '2025-01-01' AND '2025-01-02'
+
+What Broker checks:
+  1. List of segments covering that time range (from metadata cache)
+  2. Which Historical/Indexer holds each segment
+  3. If duplicate segments exist, only the highest-priority version is selected (compaction results take precedence)
+```
+
+#### Query Performance Factors
+
+| Factor | Impact | Tuning point |
+|--------|--------|-------------|
+| Historical count | Parallel segment processing | replicas, add nodes |
+| Broker heap | Memory for merging | increase `-Xmx` |
+| Segment size | File I/O | merge via compaction |
+| Segment cache | Avoids re-downloading from S3 | increase Historical PVC size |
+| Broker query cache | Accelerates repeated queries | `druid.broker.cache.*` |
+
+```bash
+# Check segment count and size currently loaded
+curl -s http://localhost:8081/druid/coordinator/v1/datasources/<datasource>/segments \
+  | python3 -c "import json,sys; segs=json.load(sys.stdin); print(f'Total {len(segs)} segments')"
+
+# Check Broker's segment timeline cache
+curl -s http://localhost:8082/druid/broker/v1/loadstatus
+
+# Check query execution plan (SQL)
+curl -s -X POST http://localhost:8082/druid/v2/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "EXPLAIN PLAN FOR SELECT COUNT(*) FROM <datasource>"}' \
+  | python3 -m json.tool
+```
+
+---
+
+### 2-4. Coordinator — Segment Lifecycle
+
+```
+Indexer uploads segment
+  │
+  ▼
+Registered in PostgreSQL metadata DB (used=1)
+  │
+  ▼
+Coordinator detects (polling period: druid.coordinator.period=PT30S)
+  │
+  ├──▶ Check retention policy
+  │      · Segments past retention period → used=0 (logical delete)
+  │      · Physical delete from Deep Storage is performed by a separate Kill Task
+  │
+  ├──▶ Check replication rules
+  │      · replicants=1 → load on 1 Historical only
+  │      · replicants=2 → replicate to 2 Historicals
+  │
+  └──▶ Instruct load
+         Historical: "download this segment from S3 and start serving"
+```
+
+```bash
+# Segment load progress
+curl -s http://localhost:8081/druid/coordinator/v1/loadstatus
+
+# Unloaded segments (not yet received by Historical)
+curl -s http://localhost:8081/druid/coordinator/v1/loadqueue
+
+# Delete a segment (logical delete)
+curl -X DELETE "http://localhost:8081/druid/coordinator/v1/datasources/<datasource>/intervals/<interval>"
+```
+
+---
+
+### 2-5. MiddleManager vs Indexer — Ingestion Flow Comparison
+
+#### MiddleManager approach (previous configuration)
+
+```
+[Router UI] Load data setup
+    ↓
+[Router] managementProxy → forwards to Overlord API
+    ↓
+[Overlord] Registers Supervisor and runs continuously
+    ↓
+[Overlord] Decides to create Task every taskDuration → requests Task assignment to MiddleManager
+    ↓
+[MiddleManager] Receives Task → forks Peon process (runs separate JVM)
+    ↓
+[Peon JVM] Kafka consuming → in-memory buffering → segment creation → S3 upload
+    ↓
+[Overlord] Supervisor detects taskDuration expiry
+    ├── Sends stop signal to Peon
+    └── Assigns new Task to MiddleManager → forks new Peon
+    ↓
+[Peon] S3 upload complete → writes segment metadata to PostgreSQL
+    ↓
+[Coordinator] Detects new segment via PostgreSQL polling (30-second interval)
+    ↓
+[Historical] Downloads segment from S3 → local PVC cache → ready to serve queries
+```
+
+#### Indexer approach (current configuration)
+
+```
+[Router UI] Load data setup
+    ↓
+[Router] managementProxy → forwards to Overlord API
+    ↓
+[Overlord] Registers Supervisor and runs continuously
+    ↓
+[Overlord] Decides to create Task every taskDuration → requests Task assignment to Indexer
+    ↓
+[Indexer JVM] Executes Task as a JVM thread (no fork)
+              └── MDC keys set → log4j2 RoutingAppender → writes logs to file
+    ↓
+[Indexer Thread] Kafka consuming → in-memory buffering → segment creation → S3 upload
+    ↓
+[Overlord] Supervisor detects taskDuration expiry
+    ├── Sends stop signal to thread (interrupt)
+    └── Starts new Task thread (no new fork needed)
+    ↓
+[Indexer] S3 upload complete → writes segment metadata to PostgreSQL
+    ↓
+[Coordinator] Detects new segment via PostgreSQL polling (30-second interval)
+    ↓
+[Historical] Downloads segment from S3 → local PVC cache → ready to serve queries
+```
+
+#### Comparison
+
+| Item | MiddleManager | Indexer (current) |
+|------|--------------|-------------------|
+| Task execution | Separate Peon process (fork) | Thread within the same JVM |
+| Log files | Auto-created per process → uploaded to S3 | Requires RoutingAppender setup |
+| UI log viewing | Works by default | Works after applying RoutingAppender |
+| K8s resource model | Mismatch with Pod-level isolation | Pod = JVM = Task group, aligned |
+| Worker registration | Pod label patch (`druidDiscoveryAnnouncement-*`) | Kubernetes Service-based discovery |
+| Tasks on failure | Pod restart = all Peons forcibly killed | Threads stop, JVM continues |
+| `worker.capacity` | Max concurrent Peons per MiddleManager | Max concurrent Task threads per Indexer |
+
+#### worker.capacity Setting
+
+```properties
+# base/indexer-configmap.yaml → runtime.properties
+druid.worker.capacity=3   # maximum concurrent tasks a single Indexer Pod can handle
+```
+
+`replicas=2` (2 Indexer Pods) + `worker.capacity=3` = maximum 6 Tasks cluster-wide.  
+Increasing `worker.capacity` means the JVM must accommodate all Tasks together, so also increase `-Xmx`.
+
+---
+
+## 3. Full Kustomize Structure
 
 ```
 apache-druid-kustomize/
@@ -84,7 +447,7 @@ apache-druid-kustomize/
     │       ├── druid-common-config-with-aliyun-oss.yaml
     │       ├── druid-common-config-with-cloudfiles.yaml
     │       ├── druid-common-config-with-cassandra.yaml
-    │       └── statefulsets-with-aws-region.yaml      # S3/MinIO: AWS_REGION injection
+    │       └── statefulsets-with-aws-region.yaml      # AWS_REGION injection (alternative, commented out by default)
     └── <your-cluster>/                # Your custom overlay — gitignored
         └── (copy of apache-druid-37.0.0, edit as needed)
 ```
@@ -106,7 +469,7 @@ overlays/    Environment-specific final configuration.
 
 ---
 
-## 3. Usage (Quick Start)
+## 4. Usage (Quick Start)
 
 ### Create Your Overlay
 
@@ -208,7 +571,7 @@ kubectl rollout restart statefulset/druid-indexers
 
 ---
 
-## 4. File Descriptions
+## 5. File Descriptions
 
 ### `base/common-configmap.yaml`
 
@@ -298,7 +661,7 @@ env:
 | `POD_NAMESPACE` | base | Specifies the namespace when calling the Kubernetes API | Cross-namespace misbehavior |
 | `POD_IP` | base | Injected as the `druid_host` value — used by Druid to advertise its cluster address | Falls back to hostname → inter-component communication fails |
 | `druid_host` | base | Overrides the `druid.host` setting via env | — |
-| `AWS_REGION` | **overlay patch only** | Used by the AWS SDK to resolve the S3 endpoint region | S3/MinIO connection may fail |
+| `AWS_REGION` | **config patch or StatefulSet patch** | Used by the AWS SDK to resolve the S3 endpoint region | S3/MinIO connection may fail |
 
 **Why `druid_host=$(POD_IP)` is required:**
 
@@ -313,8 +676,37 @@ With POD_IP:   10.233.102.5    → direct communication works ✅
 
 **Why `AWS_REGION` is not in base:**
 
-Environments that don't use S3/MinIO (local emptyDir, Azure, GCS, etc.) don't need `AWS_REGION`.  
-When using S3 or MinIO, enable the overlay patch that injects it into all StatefulSets:
+Environments that don't use S3/MinIO (local emptyDir, Azure, GCS, etc.) don't need a region setting.  
+For S3/MinIO, the AWS SDK v2 requires an explicit region. There are two ways to provide it:
+
+**Approach 1 (recommended): `druid.s3.endpoint.signingRegion` in the ConfigMap patch**
+
+```properties
+# overlays/<your-cluster>/patches/druid-common-config-with-minio.yaml  (or -with-aws-s3.yaml)
+druid.s3.endpoint.signingRegion=us-east-1   # MinIO: any value / AWS S3: your bucket region
+```
+
+This is a Druid-native property that sets the region directly on the S3 client builder, scoped only to Druid's S3 client.
+
+**Source traceability** — this property does not appear in the main configuration reference page, but is documented in the S3 extension page and confirmed in source:
+
+| Item | Detail |
+|------|--------|
+| Docs | [S3 extension — Endpoint config table](https://druid.apache.org/docs/37.0.0/development/extensions-core/s3) |
+| Source file | `extensions-core/s3-extensions/src/main/java/org/apache/druid/storage/s3/S3StorageDruidModule.java` |
+| Method | `getServerSideEncryptingAmazonS3Builder()` |
+| Binding class | `AWSEndpointConfig` (property prefix: `druid.s3.endpoint`) |
+| SDK call | `Region.of(endpointConfig.getSigningRegion())` → passed to S3 client builder |
+
+Relevant source snippet (Druid 37.0.0):
+```java
+final Region region = StringUtils.isNotEmpty(endpointConfig.getSigningRegion())
+    ? Region.of(endpointConfig.getSigningRegion())
+    : null;
+// region passed to S3ClientBuilder → satisfies AWS SDK v2 region requirement
+```
+
+**Approach 2 (alternative): `AWS_REGION` env var via StatefulSet patch**
 
 ```yaml
 # overlays/<your-cluster>/patches/statefulsets-with-aws-region.yaml
@@ -325,13 +717,15 @@ When using S3 or MinIO, enable the overlay patch that injects it into all Statef
     value: "us-east-1"   # MinIO: any value works / AWS S3: must match your bucket region
 ```
 
-`AWS_REGION` is **required** by the AWS SDK for both MinIO and AWS S3.
+This injects the region at the OS env level and affects all AWS SDK components in the Pod, not just Druid's S3 client. Prefer this only if another AWS SDK component in the same Pod also requires the region.
+
+The storage ConfigMap patches in this overlay (`druid-common-config-with-minio.yaml`, `druid-common-config-with-aws-s3.yaml`) already include `druid.s3.endpoint.signingRegion`, so `statefulsets-with-aws-region.yaml` is commented out by default.
 
 **Background — why region became mandatory:**
-- **Druid 0.13.0**: replaced the `jets3t` library with the official AWS SDK for Java v1 ([PR #5382](https://github.com/apache/druid/pull/5382)). The AWS SDK v1 requires an explicit region; the old jets3t library handled this implicitly.
+- **Druid 0.13.0**: replaced the `jets3t` library with the official AWS SDK for Java v1 ([PR #5382](https://github.com/apache/druid/pull/5382)). AWS SDK v1 requires an explicit region; jets3t handled it implicitly.
 - **Druid 37.0.0**: upgraded from AWS SDK v1 (EOL) to **v2.40.0** ([PR #18891](https://github.com/apache/druid/pull/18891)). AWS SDK v2 also enforces an explicit region.
 
-- **MinIO**: any non-empty value is accepted — the SDK uses `druid.s3.endpoint.url` for the actual connection, ignoring the region for routing.
+- **MinIO**: any non-empty value is accepted — the SDK routes via `druid.s3.endpoint.url`, not the region.
 - **AWS S3**: must match the region where the bucket resides (e.g., `ap-northeast-2`).
 
 ### `components/pvc/kustomization.yaml`
@@ -362,11 +756,17 @@ spec:
     - metadata:
         name: data
       spec:
-        storageClassName: longhorn   # override cluster default
+        accessModes: ["ReadWriteOnce"]   # must be present — SMP replaces spec, not merges
+        storageClassName: longhorn       # override cluster default (omit to use cluster default)
         resources:
           requests:
-            storage: 50Gi           # override size
+            storage: 50Gi              # override size
 ```
+
+> **Important**: `accessModes` must be explicitly included in `pvc-patch.yaml`.  
+> Kustomize's Strategic Merge Patch replaces the `spec` sub-object of each `volumeClaimTemplates` entry.  
+> If `accessModes` is omitted, the value set by `components/pvc` is lost and Kubernetes rejects the StatefulSet with:  
+> `spec.volumeClaimTemplates[0].spec.accessModes: Required value: at least 1 access mode is required`
 
 ### `overlays/<your-cluster>/patches/replicas.yaml`
 
@@ -617,7 +1017,7 @@ patches:
 
 ---
 
-## 5. Storage Component Selection
+## 6. Storage Component Selection
 
 `base/` and `components/` are kept as read-only reference templates.  
 All environment-specific values live in overlay patch files — never edit component files directly.
@@ -646,10 +1046,12 @@ patches:
   # - path: patches/druid-common-config-with-cloudfiles.yaml
   # - path: patches/druid-common-config-with-cassandra.yaml
 
-  # Enable when using S3 or MinIO ↓
-  - path: patches/statefulsets-with-aws-region.yaml
-    target:
-      kind: StatefulSet
+  # AWS_REGION env (alternative) — commented out by default
+  # Region is already set via druid.s3.endpoint.signingRegion in the ConfigMap patch above.
+  # Enable only if you need AWS_REGION at the OS env level.
+  # - path: patches/statefulsets-with-aws-region.yaml
+  #   target:
+  #     kind: StatefulSet
 ```
 
 ### Required Settings per Storage Backend
@@ -661,6 +1063,7 @@ Fill in the `<...>` placeholders directly in each `overlays/.../patches/druid-co
 druid.s3.accessKey=<MINIO_ACCESSKEY>
 druid.s3.secretKey=<MINIO_SECRETKEY>
 druid.s3.endpoint.url=http://<MINIO-ENDPOINT>
+druid.s3.endpoint.signingRegion=us-east-1   # any value; MinIO ignores region
 druid.s3.enablePathStyleAccess=true
 ```
 
@@ -669,7 +1072,7 @@ druid.s3.enablePathStyleAccess=true
 druid.s3.accessKey=<AWS_ACCESSKEY>
 druid.s3.secretKey=<AWS_SECRETKEY>
 druid.storage.bucket=<APACHE-DRUID-BUCKET>
-# Also set AWS_REGION in patches/statefulsets-with-aws-region.yaml
+druid.s3.endpoint.signingRegion=<BUCKET_REGION>  # e.g. ap-northeast-2
 ```
 
 **Azure Blob** (`patches/druid-common-config-with-azure.yaml`)
@@ -717,9 +1120,9 @@ druid.storage.oss.bucket=<OSS_BUCKET>
 
 ---
 
-## 6. Key Design Decisions
+## 7. Key Design Decisions
 
-### 6-1. MiddleManager → Indexer Migration
+### 7-1. MiddleManager → Indexer Migration
 
 **Before**: `MiddleManager` + `Peon` (fork model)  
 **Now**: `Indexer` (JVM thread model)
@@ -746,7 +1149,7 @@ Indexer:       Pod → [JVM] ─────── [Thread] × N      (same JVM)
 
 ---
 
-### 6-2. Per-Task Log Files (log4j2 RoutingAppender)
+### 7-2. Per-Task Log Files (log4j2 RoutingAppender)
 
 **Problem**: Druid UI Tasks → Logs button returns an empty page  
 **Cause**: Indexer uses threads, so no separate log file is created automatically  
@@ -783,7 +1186,7 @@ and the Druid UI displays it via `GET /druid/indexer/v1/task/{taskId}/log`.
 
 ---
 
-### 6-3. Indexer HA Setup (replicas=2)
+### 7-3. Indexer HA Setup (replicas=2)
 
 The base Indexer defaults to `replicas: 1`. For environments requiring HA, increase it to 2 via an overlay patch.
 
@@ -839,11 +1242,11 @@ druid.worker.capacity=3   # concurrent tasks per Pod. With replicas=2, max 6 tas
 
 With Indexer replicas=2, each pod requires memory request 1Gi for scheduling.  
 The increase from 1Gi → 1Gi × 2 = 2Gi additional capacity was needed,  
-which was achieved by first reducing Kafka memory (see 6-4 below).
+which was achieved by first reducing Kafka memory (see 7-4 below).
 
 ---
 
-### 6-4. Kafka Resource Optimization
+### 7-4. Kafka Resource Optimization
 
 **Problem**: Kafka's default JVM heap of 1GB caused memory shortage  
 **Solution**: Lower JVM heap to 256MB and fix requests=limits
@@ -870,7 +1273,7 @@ Measured actual Kafka pod memory usage with heap 256m: ~78Mi
 
 ---
 
-### 6-5. ZooKeeper-free Kubernetes Service Discovery
+### 7-5. ZooKeeper-free Kubernetes Service Discovery
 
 ```properties
 druid.zk.service.enabled=false
@@ -892,7 +1295,7 @@ Since Druid 26+, you can use the Kubernetes API directly for service discovery w
 
 ---
 
-### 6-6. Deep Storage: S3 (MinIO Compatible)
+### 7-6. Deep Storage: S3 (MinIO Compatible)
 
 ```properties
 druid.storage.type=s3
@@ -913,7 +1316,7 @@ Required MinIO bucket: `druid` (shared for segments + indexing-logs)
 
 ---
 
-### 6-7. Kustomize Structure Design Principles
+### 7-7. Kustomize Structure Design Principles
 
 #### base = minimal configuration with no dependencies
 
@@ -955,16 +1358,16 @@ Credentials and environment-specific endpoints go in overlay patch files (`druid
 
 ---
 
-## 7. Known Issues
+## 8. Known Issues
 
-### 7-1. Task "Could not allocate segment" Failure
+### 8-1. Task "Could not allocate segment" Failure
 
 **Symptom**: Task fails with `Could not allocate segment` error in task logs  
 **Cause**: Task runs immediately after cluster restart before segment metadata has fully loaded from the DB  
 **Impact**: Already-committed segments are **not deleted** (Druid segments are immutable)  
 **Resolution**: Wait for the Coordinator to fully initialize (typically 30–60 seconds) after restart, then restart the Supervisor
 
-### 7-2. Kubernetes Watch Expiry Causes Indexer Offline Detection (resolved)
+### 8-2. Kubernetes Watch Expiry Causes Indexer Offline Detection (resolved)
 
 **Symptom**: Every ~60 minutes, the Overlord considers the Indexer offline and fails to reassign Tasks  
 **Cause**: Druid bug where Kubernetes watch connection expires and reconnection fails  
@@ -972,7 +1375,7 @@ Credentials and environment-specific endpoints go in overlay patch files (`druid
 
 If the issue recurs, an Overlord rollout restart provides immediate recovery.
 
-### 7-3. Completed Task History Lost on Overlord Restart
+### 8-3. Completed Task History Lost on Overlord Restart
 
 **Symptom**: After Overlord restart, all previous task entries disappear from the UI Tasks tab  
 **Cause**: `druid.indexer.storage.type=local` (default) — Task history is stored only in Overlord memory
@@ -1049,14 +1452,14 @@ The default (10) shows only the 10 most recent entries. To see more history, add
 Task log files themselves (uploaded to S3) are preserved regardless of storage.type.  
 storage.type only affects the **Task metadata history** visible in the Overlord UI.
 
-### 7-4. Indexer Memory Over-allocation Warning
+### 8-4. Indexer Memory Over-allocation Warning
 
 **Symptom**: `kubectl top node` shows node3 memory at 93% allocated  
 **Cause**: Indexer replicas=2, requests=1Gi × 2 = 2Gi both scheduled on node3  
 **Impact**: If actual usage stays below requests, OOM does not occur (Kubernetes schedules based on requests)  
 **Monitoring**: `kubectl top pod`, `kubectl describe node node3 | grep MemoryPressure`
 
-### 7-5. Druid 37 + Jetty 12 — Router managementProxy Thread Shortage (resolved)
+### 8-5. Druid 37 + Jetty 12 — Router managementProxy Thread Shortage (resolved)
 
 **Symptom**: Router Pod CrashLoopBackOff or error immediately after startup
 
@@ -1114,7 +1517,7 @@ druid.router.http.numConnections=200   # 200/25 = 8 threads → provides headroo
 Method A causes the `Load data` setup in the web console to stop working,  
 so `-XX:ActiveProcessorCount=4` was adopted as the final solution.
 
-### 7-6. Control-plane (plane1) Memory Growth — apiserver Watch Accumulation
+### 8-6. Control-plane (plane1) Memory Growth — apiserver Watch Accumulation
 
 > **Note**: After deploying Druid, plane1 (control-plane) memory grows gradually before stabilizing at a certain level. This is expected behavior.
 
@@ -1196,9 +1599,9 @@ If the Indexer appears in the worker list, the watch connection is working norma
 
 ---
 
-## 8. Troubleshooting Guide
+## 9. Troubleshooting Guide
 
-### 8-1. Basic Diagnostic Commands
+### 9-1. Basic Diagnostic Commands
 
 #### Pod Status
 
@@ -1247,7 +1650,7 @@ kubectl describe node node1 node2 node3 | grep MemoryPressure
 
 ---
 
-### 8-2. Per-component Log Inspection
+### 9-2. Per-component Log Inspection
 
 ```bash
 # Query all logs at once by label
@@ -1275,7 +1678,7 @@ kubectl exec druid-indexers-0 -- tail -200 /opt/druid/var/druid/task/slot0/<task
 
 ---
 
-### 8-3. Checking Internal State via Druid API
+### 9-3. Checking Internal State via Druid API
 
 After port-forward, use curl to directly query each component's internal state.
 
@@ -1309,7 +1712,7 @@ curl -s http://localhost:8888/druid/v2/datasources
 
 ---
 
-### 8-4. Actual Errors Encountered and Resolutions
+### 9-4. Actual Errors Encountered and Resolutions
 
 #### Error 1: Tasks → Logs button shows blank page
 
@@ -1525,7 +1928,7 @@ Measured actual Kafka Pod usage: ~78Mi with heap 256m (KRaft, 3 replicas).
 
 ---
 
-### 8-5. Quick Diagnostic Script
+### 9-5. Quick Diagnostic Script
 
 Prints the entire cluster status at once.
 
@@ -1554,7 +1957,7 @@ kubectl describe node $(kubectl get node -o name | sed 's|node/||') \
 
 ---
 
-## 9. Kafka Configuration Reference
+## 10. Kafka Configuration Reference
 
 KRaft mode (no ZooKeeper required), 3 replicas. Uses a Headless Service for Pod-to-Pod communication.
 
@@ -1770,368 +2173,6 @@ Replace the generated ID in **both of these places**:
   }
 }
 ```
-
----
-
-## 10. Druid Architecture — Component Roles and Data Flow
-
-### 10-1. Component Roles
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Query / Ingest                           │
-│                                                                 │
-│   Client ──→ Router ──→ Broker ──→ Historical                   │
-│                    └──→ Overlord ──→ Indexer (real-time segs)   │
-│                    └──→ Coordinator                             │
-│                                                                 │
-│                  [PostgreSQL: metadata]                         │
-│                  [S3/MinIO: Deep Storage]                       │
-└─────────────────────────────────────────────────────────────────┘
-```
-
-| Component | Port | Role |
-|-----------|------|------|
-| **Coordinator** | 8081 | Segment distribution management. Instructs Historical nodes on which segments to load/drop. Manages retention policies and auto-compaction |
-| **Overlord** | 8090 | Task lifecycle management. Creates/terminates Supervisors, assigns Tasks to Indexers, records task status in the metadata DB |
-| **Broker** | 8082 | Query router. Inspects the segment timeline to distribute sub-queries to Historical/Indexer nodes, then merges and returns the result |
-| **Historical** | 8083 | Immutable segment serving. Downloads segments from Deep Storage, caches them locally, and responds to queries |
-| **Indexer** | 8091 | Ingest task execution (JVM thread model). Real-time indexing of new data and segment upload to Deep Storage |
-| **Router** | 8888 | API gateway + web console. Proxies queries to Broker, Task API to Overlord, segment API to Coordinator |
-
-#### Component Data Stores
-
-| Store | Role | In this deployment |
-|-------|------|-------------------|
-| **Deep Storage** | Permanent storage for segment files (.smoosh) | S3/MinIO (`druid` bucket) |
-| **Metadata Store** | Segment registry, task history, Supervisor state | PostgreSQL (`druid-postgresql:5432`) |
-| **Local Cache** | Segments downloaded by Historical for serving | PVC (`/opt/druid/var`) |
-
----
-
-### 10-2. Kafka → Druid Ingestion Flow
-
-```
-Kafka Topic
-  │
-  │  (1) Supervisor assigns partitions
-  ▼
-Indexer Task (real-time consumption)
-  │  · Reads messages via Kafka Consumer
-  │  · Adds rows to in-memory Incremental Index
-  │  · On taskDuration (default 1h) or row count threshold → Publish
-  │
-  │  (2) Publish phase
-  ├──▶ Uploads segment file to Deep Storage (S3)
-  ├──▶ Registers segment in PostgreSQL metadata DB
-  └──▶ New Task picks up from the next Kafka offset
-         │
-         │  (3) Coordinator detects
-         ▼
-     Historical Node
-       · Downloads segment from S3 → local cache
-       · Subsequent queries answered by Historical
-```
-
-#### Supervisor State Machine
-
-```
-PENDING ──▶ RUNNING ──▶ SUSPENDED
-                │             │
-                ▼             ▼
-            STOPPING      RUNNING (on resume)
-                │
-                ▼
-           UNHEALTHY (on consecutive Task failures)
-```
-
-```bash
-# List Supervisors and their status
-curl -s http://localhost:8090/druid/indexer/v1/supervisor | python3 -m json.tool
-
-# Detailed status of a specific Supervisor
-curl -s http://localhost:8090/druid/indexer/v1/supervisor/<id>/status
-
-# Kafka offset consumption (per-partition lag)
-curl -s http://localhost:8090/druid/indexer/v1/supervisor/<id>/stats
-```
-
-#### Supervisor Parameters: taskCount vs replicas
-
-The two parameters serve **different purposes**.
-
-| Parameter | Role | Effect |
-|-----------|------|--------|
-| `taskCount` | Split partitions for parallel processing | **Throughput ↑** |
-| `replicas` | Duplicate processing of the same data | **High availability (HA) ↑** |
-
-**Behavior per configuration**
-
-| Config | Task count | Partition distribution | Effect |
-|--------|-----------|----------------------|--------|
-| `taskCount=1, replicas=2` (current) | 2 | Each Task consumes all of P0,P1,P2 | HA (fault tolerance) |
-| `taskCount=2, replicas=1` | 2 | Task-A → P0,P1 / Task-B → P2 | 2× throughput |
-| `taskCount=2, replicas=2` | 4 | Above config with a replica for each | HA + 2× throughput |
-
-**Current configuration (taskCount=1, replicas=2) — HA behavior**
-
-```
-Kafka Topic (partition 0, 1, 2)
-           │
-     ┌─────┴─────┐
-     │  Overlord  │  ← Supervisor creates and manages 2 Tasks
-     └─────┬─────┘
-     ┌─────┴──────────────────┐
-     ▼                        ▼
-  Task-A                   Task-B
-(consumes P0, P1, P2)   (consumes P0, P1, P2)
-     │                        │
-druid-indexers-0         druid-indexers-1
-
-Task-A fails
-  → Task-B immediately resumes from last committed offset (no data loss)
-  → Supervisor reassigns a new Task-A to druid-indexers-0
-  → Both Tasks resume simultaneous consumption (HA restored)
-```
-
-**Throughput scaling (taskCount=2, replicas=1)**
-
-```
-Kafka Topic (partition 0, 1, 2)
-           │
-     ┌─────┴─────┐
-     │  Overlord  │  ← Supervisor creates 2 Tasks
-     └─────┬─────┘
-     ┌─────┴──────────────────┐
-     ▼                        ▼
-  Task-A                   Task-B
-(handles P0, P1)          (handles P2)
-     │                        │
-druid-indexers-0         druid-indexers-1
-```
-
-> `taskCount` cannot exceed the number of Kafka partitions. With 3 partitions, `taskCount` max is 3.
-
-```json
-// Example: throughput + HA simultaneously (3 partitions, 6 Tasks)
-"taskCount": 3,
-"replicas": 2
-```
-
-#### Supervisor Task States: active vs publishing
-
-On the Supervisor screen, you may see both states simultaneously:
-
-```
-(1 task × 2 replicas)
-2 active tasks
-2 publishing tasks
-```
-
-These two states represent **different generations of tasks**.
-
-| State | What it does | Kafka reads | Deep storage upload |
-|-------|-------------|-------------|---------------------|
-| **active** | Actively consuming Kafka partitions | ✅ continuously reading | ❌ |
-| **publishing** | Finalizing/pushing segments | ❌ reading stopped | ✅ in progress |
-
-**Task lifecycle:**
-
-```
-[active]  reading data from Kafka
-    ↓  segment granularity boundary reached or task.duration expired
-[publishing]  Kafka reading stops → segments merged → pushed to deep storage → metadata registered
-    ↓  complete
-[done]  Historical loads segment → queryable
-```
-
-When an active task reaches a segment boundary:
-1. The task transitions to **publishing** state (starts pushing to S3/MinIO)
-2. Supervisor **immediately creates a new active task** — no gap in Kafka reads
-3. When the publishing task completes, Historical loads the segment
-
-So `2 active + 2 publishing` is **normal**. The previous generation is completing its push while the new generation is already reading from Kafka.
-
----
-
-### 10-3. Query Execution Flow
-
-```
-Client (SQL / Native JSON)
-  │
-  ▼
-Router :8888
-  │  · queries → proxied to Broker
-  │  · Task API → proxied to Overlord
-  │
-  ▼
-Broker :8082
-  │  (1) Query segment timeline
-  │      · caches "which Historical holds which segments" from Coordinator
-  │      · caches "real-time segment range" from Indexer
-  │
-  │  (2) Distribute sub-queries
-  ├──▶ Historical :8083  (published segments)
-  └──▶ Indexer :8091    (real-time segments not yet published)
-         │
-         │  (3) Each node returns partial results from its segments
-         ▼
-Broker (4) Merges partial results → applies final aggregation/sort/LIMIT
-  │
-  ▼
-Client ← final response
-```
-
-#### Segment Selection Criteria for Queries
-
-```
-Query: SELECT ... WHERE __time BETWEEN '2025-01-01' AND '2025-01-02'
-
-What Broker checks:
-  1. List of segments covering that time range (from metadata cache)
-  2. Which Historical/Indexer holds each segment
-  3. If duplicate segments exist, only the highest-priority version is selected (compaction results take precedence)
-```
-
-#### Query Performance Factors
-
-| Factor | Impact | Tuning point |
-|--------|--------|-------------|
-| Historical count | Parallel segment processing | replicas, add nodes |
-| Broker heap | Memory for merging | increase `-Xmx` |
-| Segment size | File I/O | merge via compaction |
-| Segment cache | Avoids re-downloading from S3 | increase Historical PVC size |
-| Broker query cache | Accelerates repeated queries | `druid.broker.cache.*` |
-
-```bash
-# Check segment count and size currently loaded
-curl -s http://localhost:8081/druid/coordinator/v1/datasources/<datasource>/segments \
-  | python3 -c "import json,sys; segs=json.load(sys.stdin); print(f'Total {len(segs)} segments')"
-
-# Check Broker's segment timeline cache
-curl -s http://localhost:8082/druid/broker/v1/loadstatus
-
-# Check query execution plan (SQL)
-curl -s -X POST http://localhost:8082/druid/v2/sql \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "EXPLAIN PLAN FOR SELECT COUNT(*) FROM <datasource>"}' \
-  | python3 -m json.tool
-```
-
----
-
-### 10-4. Coordinator — Segment Lifecycle
-
-```
-Indexer uploads segment
-  │
-  ▼
-Registered in PostgreSQL metadata DB (used=1)
-  │
-  ▼
-Coordinator detects (polling period: druid.coordinator.period=PT30S)
-  │
-  ├──▶ Check retention policy
-  │      · Segments past retention period → used=0 (logical delete)
-  │      · Physical delete from Deep Storage is performed by a separate Kill Task
-  │
-  ├──▶ Check replication rules
-  │      · replicants=1 → load on 1 Historical only
-  │      · replicants=2 → replicate to 2 Historicals
-  │
-  └──▶ Instruct load
-         Historical: "download this segment from S3 and start serving"
-```
-
-```bash
-# Segment load progress
-curl -s http://localhost:8081/druid/coordinator/v1/loadstatus
-
-# Unloaded segments (not yet received by Historical)
-curl -s http://localhost:8081/druid/coordinator/v1/loadqueue
-
-# Delete a segment (logical delete)
-curl -X DELETE "http://localhost:8081/druid/coordinator/v1/datasources/<datasource>/intervals/<interval>"
-```
-
----
-
-### 10-5. MiddleManager vs Indexer — Ingestion Flow Comparison
-
-#### MiddleManager approach (previous configuration)
-
-```
-[Router UI] Load data setup
-    ↓
-[Router] managementProxy → forwards to Overlord API
-    ↓
-[Overlord] Registers Supervisor and runs continuously
-    ↓
-[Overlord] Decides to create Task every taskDuration → requests Task assignment to MiddleManager
-    ↓
-[MiddleManager] Receives Task → forks Peon process (runs separate JVM)
-    ↓
-[Peon JVM] Kafka consuming → in-memory buffering → segment creation → S3 upload
-    ↓
-[Overlord] Supervisor detects taskDuration expiry
-    ├── Sends stop signal to Peon
-    └── Assigns new Task to MiddleManager → forks new Peon
-    ↓
-[Peon] S3 upload complete → writes segment metadata to PostgreSQL
-    ↓
-[Coordinator] Detects new segment via PostgreSQL polling (30-second interval)
-    ↓
-[Historical] Downloads segment from S3 → local PVC cache → ready to serve queries
-```
-
-#### Indexer approach (current configuration)
-
-```
-[Router UI] Load data setup
-    ↓
-[Router] managementProxy → forwards to Overlord API
-    ↓
-[Overlord] Registers Supervisor and runs continuously
-    ↓
-[Overlord] Decides to create Task every taskDuration → requests Task assignment to Indexer
-    ↓
-[Indexer JVM] Executes Task as a JVM thread (no fork)
-              └── MDC keys set → log4j2 RoutingAppender → writes logs to file
-    ↓
-[Indexer Thread] Kafka consuming → in-memory buffering → segment creation → S3 upload
-    ↓
-[Overlord] Supervisor detects taskDuration expiry
-    ├── Sends stop signal to thread (interrupt)
-    └── Starts new Task thread (no new fork needed)
-    ↓
-[Indexer] S3 upload complete → writes segment metadata to PostgreSQL
-    ↓
-[Coordinator] Detects new segment via PostgreSQL polling (30-second interval)
-    ↓
-[Historical] Downloads segment from S3 → local PVC cache → ready to serve queries
-```
-
-#### Comparison
-
-| Item | MiddleManager | Indexer (current) |
-|------|--------------|-------------------|
-| Task execution | Separate Peon process (fork) | Thread within the same JVM |
-| Log files | Auto-created per process → uploaded to S3 | Requires RoutingAppender setup |
-| UI log viewing | Works by default | Works after applying RoutingAppender |
-| K8s resource model | Mismatch with Pod-level isolation | Pod = JVM = Task group, aligned |
-| Worker registration | Pod label patch (`druidDiscoveryAnnouncement-*`) | Kubernetes Service-based discovery |
-| Tasks on failure | Pod restart = all Peons forcibly killed | Threads stop, JVM continues |
-| `worker.capacity` | Max concurrent Peons per MiddleManager | Max concurrent Task threads per Indexer |
-
-#### worker.capacity Setting
-
-```properties
-# base/indexer-configmap.yaml → runtime.properties
-druid.worker.capacity=3   # maximum concurrent tasks a single Indexer Pod can handle
-```
-
-`replicas=2` (2 Indexer Pods) + `worker.capacity=3` = maximum 6 Tasks cluster-wide.  
-Increasing `worker.capacity` means the JVM must accommodate all Tasks together, so also increase `-Xmx`.
 
 ---
 

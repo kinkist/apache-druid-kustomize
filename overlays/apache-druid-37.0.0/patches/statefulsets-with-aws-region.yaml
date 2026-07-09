@@ -1,6 +1,9 @@
-# Inject AWS_REGION env into all Druid StatefulSets
-# Required for both S3 and MinIO — newer AWS SDK versions enforce this.
-# Enable together with druid-common-config-with-minio.yaml or druid-common-config-with-aws-s3.yaml
+# [Alternative] Inject AWS_REGION env var into all Druid StatefulSets.
+#
+# druid.s3.endpoint.signingRegion (in the ConfigMap patch) is the preferred approach
+# because it is scoped to Druid's S3 client only.
+# Use this patch only if you need AWS_REGION set at the OS env level
+# (e.g., for other AWS SDK components outside of Druid's S3 client).
 #
 # MinIO: any non-empty value works — SDK routes via druid.s3.endpoint.url, not region
 # AWS S3: must match the region where your bucket lives (e.g. ap-northeast-2)

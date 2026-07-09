@@ -29,7 +29,8 @@ data:
     # ⚠️  You must create the Cassandra keyspace/schema separately before use.
     # ⚠️  https://github.com/apache/druid/tree/master/extensions-contrib/cassandra-storage
     druid.storage.type=c*
-    druid.storage.host=<CASSANDRA_HOST>           # e.g. cassandra.default.svc.cluster.local
+    # e.g. cassandra.default.svc.cluster.local
+    druid.storage.host=<CASSANDRA_HOST>
     druid.storage.keyspace=druid
     druid.storage.archiveOnDelete=true
 

@@ -26,9 +26,12 @@ data:
     druid.storage.type=cloudfiles
     druid.cloudfiles.userName=<RACKSPACE_USERNAME>
     druid.cloudfiles.apiKey=<RACKSPACE_API_KEY>
-    druid.cloudfiles.provider=rackspace-cloudfiles-us   # or rackspace-cloudfiles-uk
-    druid.cloudfiles.useServiceNet=true                 # optimizes intra-region traffic
-    druid.storage.region=<CLOUDFILES_REGION>            # e.g. IAD, DFW, ORD, SYD, LON, HKG
+    # or rackspace-cloudfiles-uk
+    druid.cloudfiles.provider=rackspace-cloudfiles-us
+    # true: optimizes intra-region traffic cost
+    druid.cloudfiles.useServiceNet=true
+    # e.g. IAD, DFW, ORD, SYD, LON, HKG
+    druid.storage.region=<CLOUDFILES_REGION>
     druid.storage.container=<CLOUDFILES_CONTAINER>
     druid.storage.basePath=druid/segments
 

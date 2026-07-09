@@ -1,7 +1,9 @@
 # PVC size override
 # Overrides storage sizes from components/pvc/kustomization.yaml without modifying the component.
 #
-# storageClassName is omitted here — components/pvc sets it to "gp2" (cluster default).
+# accessModes must be specified here — the Strategic Merge Patch replaces the spec sub-object,
+# so omitting accessModes would clear the value set by components/pvc.
+#
 # To use a different StorageClass, add: storageClassName: <name>
 #   gp2         — NFS (nfs-subdir-external-provisioner) ← cluster default
 #   nfs-client  — NFS (nfs-subdir-external-provisioner)
@@ -18,6 +20,7 @@ spec:
     - metadata:
         name: data
       spec:
+        accessModes: ["ReadWriteOnce"]
         resources:
           requests:
             storage: 8Gi
@@ -32,6 +35,7 @@ spec:
     - metadata:
         name: data
       spec:
+        accessModes: ["ReadWriteOnce"]
         resources:
           requests:
             storage: 5Gi
@@ -46,6 +50,7 @@ spec:
     - metadata:
         name: data
       spec:
+        accessModes: ["ReadWriteOnce"]
         resources:
           requests:
             storage: 5Gi
@@ -60,6 +65,7 @@ spec:
     - metadata:
         name: data
       spec:
+        accessModes: ["ReadWriteOnce"]
         resources:
           requests:
             storage: 10Gi
@@ -74,6 +80,7 @@ spec:
     - metadata:
         name: data
       spec:
+        accessModes: ["ReadWriteOnce"]
         resources:
           requests:
             storage: 10Gi   # segment cache — increase if storing many segments locally
@@ -88,6 +95,7 @@ spec:
     - metadata:
         name: data
       spec:
+        accessModes: ["ReadWriteOnce"]
         resources:
           requests:
             storage: 10Gi   # task temp files — increase for large segment builds
@@ -102,6 +110,7 @@ spec:
     - metadata:
         name: data
       spec:
+        accessModes: ["ReadWriteOnce"]
         resources:
           requests:
             storage: 5Gi

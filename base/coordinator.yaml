@@ -24,7 +24,7 @@ spec:
         runAsGroup: 1000
       containers:
         - name: druid-coordinators
-          image: apache/druid
+          image: apache/druid:37.0.0
           command: ["/druid.sh", "coordinator"]
           env:
             - name: POD_NAME

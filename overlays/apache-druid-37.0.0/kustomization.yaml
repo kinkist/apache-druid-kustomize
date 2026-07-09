@@ -48,7 +48,9 @@ patches:
   # - path: patches/druid-common-config-with-cloudfiles.yaml  # Rackspace Cloudfiles (community)
   # - path: patches/druid-common-config-with-cassandra.yaml   # Cassandra (community)
 
-  # ── AWS_REGION env — enable when using S3 or MinIO ───────────────
-  - path: patches/statefulsets-with-aws-region.yaml
-    target:
-      kind: StatefulSet
+  # ── AWS_REGION env (alternative) ─────────────────────────────────
+  # druid.s3.endpoint.signingRegion in the ConfigMap patch is preferred.
+  # Enable this only if you need AWS_REGION at the OS env level.
+  # - path: patches/statefulsets-with-aws-region.yaml
+  #   target:
+  #     kind: StatefulSet
