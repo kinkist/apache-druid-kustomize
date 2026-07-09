@@ -326,7 +326,8 @@ MinIO 사용 시 `AWS_REGION` 값은 무관합니다(`druid.s3.endpoint.url`로 
 
 ### `components/pvc/kustomization.yaml`
 
-JSON 6902 패치로 `emptyDir`을 제거하고 `volumeClaimTemplates`를 추가합니다.
+JSON 6902 패치로 `emptyDir`을 제거하고 `volumeClaimTemplates`를 추가합니다.  
+`storageClassName`은 지정하지 않음 — 클러스터 기본 StorageClass가 자동 적용됩니다.
 
 ```
 PostgreSQL  → 8Gi  (메타데이터 DB, 반드시 PVC 권장)
@@ -338,11 +339,23 @@ Indexer     → 10Gi (task 임시 디렉토리)
 Router      → 5Gi
 ```
 
-StorageClass 기본값: `gp2` — 환경에 맞게 변경하세요.
+StorageClass나 크기를 바꾸려면 component를 수정하지 않고 overlay patch를 사용합니다:
 
 ```yaml
-# gp2 → local-path 변경 예시 (kustomization.yaml 또는 별도 patch)
-storageClassName: local-path
+# overlays/<your-cluster>/patches/pvc-patch.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-historicals
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        storageClassName: longhorn   # 클러스터 기본값 재정의
+        resources:
+          requests:
+            storage: 50Gi           # 크기 재정의
 ```
 
 ### `components/storage/{backend}/patch.yaml`
