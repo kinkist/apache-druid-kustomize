@@ -1442,7 +1442,8 @@ curl -X POST http://localhost:8090/druid/indexer/v1/supervisor/<supervisorId>/re
 kubectl logs -l nodeType=indexer --tail=300 | grep -i "s3\|access\|endpoint"
 
 # MinIO 연결 테스트 (Indexer pod 내부)
-kubectl exec druid-indexers-0 -- curl -v http://<MINIO_HOST>:9000/druid
+# Druid pod에는 curl이 없으므로 wget 사용
+kubectl exec druid-indexers-0 -- wget -S -O /dev/null http://<MINIO_HOST>:9000/druid 2>&1 | head -5
 ```
 
 **원인 및 해결**

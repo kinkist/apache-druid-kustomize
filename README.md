@@ -1445,8 +1445,8 @@ curl -X POST http://localhost:8090/druid/indexer/v1/supervisor/<supervisorId>/re
 # Search Indexer logs for S3 errors
 kubectl logs -l nodeType=indexer --tail=300 | grep -i "s3\|access\|endpoint"
 
-# Test MinIO connectivity (inside Indexer pod)
-kubectl exec druid-indexers-0 -- curl -v http://<MINIO_HOST>:9000/druid
+# Test MinIO connectivity (inside Indexer pod — curl is not available, use wget)
+kubectl exec druid-indexers-0 -- wget -S -O /dev/null http://<MINIO_HOST>:9000/druid 2>&1 | head -5
 ```
 
 **Causes and resolutions**
