@@ -1,0 +1,5 @@
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: AWS_REGION
+    value: "us-east-1"   # Any value works for MinIO / set to your bucket region for AWS S3

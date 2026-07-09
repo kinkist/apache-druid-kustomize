@@ -1,0 +1,10 @@
+# ──────────────────────────────────────────────────────────────────
+# Replica count patch
+# Indexer: 2 (HA setup - each pod consumes all partitions independently)
+# ──────────────────────────────────────────────────────────────────
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-indexers
+spec:
+  replicas: 1    # Adjust as needed: HA=2, reduce to 1 if resources are tight

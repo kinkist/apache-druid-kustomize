@@ -1,0 +1,39 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-historical-config
+data:
+  runtime.properties: |
+    druid.service=druid/historical
+    druid.plaintextPort=8083
+    druid.server.http.numThreads=5
+    druid.processing.buffer.sizeBytes=50000000
+    druid.processing.numThreads=1
+    druid.processing.numMergeBuffers=2
+    druid.segmentCache.locations=[{"path":"/opt/druid/var/druid/segment-cache","maxSize":5368709120}]
+    druid.server.maxSize=5368709120
+  jvm.config: |-
+    -server
+    -Duser.timezone=UTC
+    -Dfile.encoding=UTF-8
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+UseG1GC
+    -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+    -Djava.io.tmpdir=var/tmp
+    -Xms512m
+    -Xmx512m
+    -XX:MaxDirectMemorySize=256m
+  log4j2.xml: |
+    <?xml version="1.0" encoding="UTF-8" ?>
+    <Configuration status="WARN">
+      <Appenders>
+        <Console name="Console" target="SYSTEM_OUT">
+          <PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/>
+        </Console>
+      </Appenders>
+      <Loggers>
+        <Root level="info">
+          <AppenderRef ref="Console"/>
+        </Root>
+      </Loggers>
+    </Configuration>

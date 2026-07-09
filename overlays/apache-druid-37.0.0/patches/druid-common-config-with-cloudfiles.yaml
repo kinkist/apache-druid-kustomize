@@ -1,0 +1,57 @@
+# Rackspace Cloud Files — overlay-level override of druid-common-config
+# Fill in: RACKSPACE_USERNAME, RACKSPACE_API_KEY, CLOUDFILES_REGION, CLOUDFILES_CONTAINER
+# Community extension — limited official documentation
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-common-config
+data:
+  common.runtime.properties: |
+    # ZooKeeper-less K8s discovery
+    druid.zk.service.enabled=false
+    druid.discovery.type=k8s
+    druid.discovery.k8s.clusterIdentifier=druid-default
+    druid.serverview.type=http
+    druid.coordinator.loadqueuepeon.type=http
+    druid.indexer.runner.type=httpRemote
+
+    # Metadata storage (PostgreSQL)
+    druid.metadata.storage.type=postgresql
+    druid.metadata.storage.connector.connectURI=jdbc:postgresql://druid-postgresql:5432/druid
+    druid.metadata.storage.connector.user=druid
+    druid.metadata.storage.connector.password=druid
+    druid.metadata.storage.connector.createTables=true
+
+    # Deep storage — Rackspace Cloud Files
+    druid.storage.type=cloudfiles
+    druid.cloudfiles.userName=<RACKSPACE_USERNAME>
+    druid.cloudfiles.apiKey=<RACKSPACE_API_KEY>
+    druid.cloudfiles.provider=rackspace-cloudfiles-us   # or rackspace-cloudfiles-uk
+    druid.cloudfiles.useServiceNet=true                 # optimizes intra-region traffic
+    druid.storage.region=<CLOUDFILES_REGION>            # e.g. IAD, DFW, ORD, SYD, LON, HKG
+    druid.storage.container=<CLOUDFILES_CONTAINER>
+    druid.storage.basePath=druid/segments
+
+    # Extensions
+    druid.extensions.loadList=["druid-kafka-indexing-service","druid-kubernetes-extensions","postgresql-metadata-storage","druid-datasketches","druid-basic-security","druid-bloom-filter","druid-lookups-cached-global","druid-lookups-cached-single","druid-stats","prometheus-emitter","druid-multi-stage-query","druid-cloudfiles-extensions"]
+
+    # Service discovery
+    druid.selectors.indexing.serviceName=druid/overlord
+    druid.selectors.coordinator.serviceName=druid/coordinator
+
+    # Indexing logs — Cloudfiles log type not officially supported; using local file
+    druid.indexer.logs.type=file
+    druid.indexer.logs.directory=/opt/druid/var/druid/indexing-logs
+
+    # SQL
+    druid.sql.enable=true
+    druid.lookup.enableLookupSyncOnStartup=false
+
+    # Emitter
+    druid.emitter=prometheus
+    druid.emitter.prometheus.port=9090
+    druid.emitter.prometheus.strategy=exporter
+
+    druid.startup.logging.logProperties=true
+    druid.k8s.apiClientConfig.watchReconnectLimit=-1
+    druid.k8s.apiClientConfig.watchReconnectInterval=1000

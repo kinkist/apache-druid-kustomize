@@ -1,0 +1,127 @@
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+# Replaces base emptyDir with PVC (volumeClaimTemplates).
+# volumes array index:
+#   druid-postgresql   → [0]=data(emptyDir)
+#   druid-*            → [0]=common-config, [1]=node-config, [2]=data(emptyDir)
+
+patches:
+  - target:
+      kind: StatefulSet
+      name: druid-postgresql
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/volumes/0
+      - op: add
+        path: /spec/volumeClaimTemplates
+        value:
+          - metadata:
+              name: data
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 8Gi
+
+  - target:
+      kind: StatefulSet
+      name: druid-coordinators
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/volumes/2
+      - op: add
+        path: /spec/volumeClaimTemplates
+        value:
+          - metadata:
+              name: data
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 5Gi
+
+  - target:
+      kind: StatefulSet
+      name: druid-overlords
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/volumes/2
+      - op: add
+        path: /spec/volumeClaimTemplates
+        value:
+          - metadata:
+              name: data
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 5Gi
+
+  - target:
+      kind: StatefulSet
+      name: druid-brokers
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/volumes/2
+      - op: add
+        path: /spec/volumeClaimTemplates
+        value:
+          - metadata:
+              name: data
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 10Gi
+
+  - target:
+      kind: StatefulSet
+      name: druid-historicals
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/volumes/2
+      - op: add
+        path: /spec/volumeClaimTemplates
+        value:
+          - metadata:
+              name: data
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 10Gi
+
+  - target:
+      kind: StatefulSet
+      name: druid-indexers
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/volumes/2
+      - op: add
+        path: /spec/volumeClaimTemplates
+        value:
+          - metadata:
+              name: data
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 10Gi
+
+  - target:
+      kind: StatefulSet
+      name: druid-routers
+    patch: |-
+      - op: remove
+        path: /spec/template/spec/volumes/2
+      - op: add
+        path: /spec/volumeClaimTemplates
+        value:
+          - metadata:
+              name: data
+            spec:
+              accessModes: ["ReadWriteOnce"]
+              resources:
+                requests:
+                  storage: 5Gi

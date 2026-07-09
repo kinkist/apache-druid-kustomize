@@ -1,0 +1,10 @@
+# All overlay directories are gitignored except the reference overlay (apache-druid-37.0.0).
+# To create your own environment:
+#   cp -rp overlays/apache-druid-37.0.0 overlays/<your-cluster>
+#   kubectl apply -k overlays/<your-cluster>/
+overlays/*
+!overlays/apache-druid-37.0.0
+!overlays/apache-druid-37.0.0/**
+
+# PostgreSQL credentials are never committed
+overlays/apache-druid-37.0.0/postgres.env

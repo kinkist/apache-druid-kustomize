@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-common-config
+data:
+  common.runtime.properties: |
+    # ZooKeeper-less K8s discovery
+    druid.zk.service.enabled=false
+    druid.discovery.type=k8s
+    druid.discovery.k8s.clusterIdentifier=druid-default
+    druid.serverview.type=http
+    druid.coordinator.loadqueuepeon.type=http
+    druid.indexer.runner.type=httpRemote
+
+    # Metadata storage (PostgreSQL)
+    druid.metadata.storage.type=postgresql
+    druid.metadata.storage.connector.connectURI=jdbc:postgresql://druid-postgresql:5432/druid
+    druid.metadata.storage.connector.user=druid
+    druid.metadata.storage.connector.password=druid
+    druid.metadata.storage.connector.createTables=true
+
+    # Deep storage — Google Cloud Storage
+    druid.storage.type=google
+    druid.google.bucket=<GCS_BUCKET>
+    druid.google.prefix=segments
+    # GCP auth: no key needed when using Workload Identity
+    # Explicit key: druid.google.jsonCredentials=<JSON_KEY_PATH>
+
+    # Extensions
+    druid.extensions.loadList=["druid-kafka-indexing-service","druid-kubernetes-extensions","postgresql-metadata-storage","druid-datasketches","druid-basic-security","druid-bloom-filter","druid-lookups-cached-global","druid-lookups-cached-single","druid-stats","prometheus-emitter","druid-multi-stage-query","druid-google-extensions"]
+
+    # Service discovery
+    druid.selectors.indexing.serviceName=druid/overlord
+    druid.selectors.coordinator.serviceName=druid/coordinator
+
+    # Indexing logs — GCS
+    druid.indexer.logs.type=google
+    druid.indexer.logs.bucket=<GCS_LOG_BUCKET>
+    druid.indexer.logs.prefix=indexing-logs
+
+    # SQL
+    druid.sql.enable=true
+    druid.lookup.enableLookupSyncOnStartup=false
+
+    # Emitter
+    druid.emitter=prometheus
+    druid.emitter.prometheus.port=9090
+    druid.emitter.prometheus.strategy=exporter
+
+    druid.startup.logging.logProperties=true
+    druid.k8s.apiClientConfig.watchReconnectLimit=-1
+    druid.k8s.apiClientConfig.watchReconnectInterval=1000

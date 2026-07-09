@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-router-config
+data:
+  runtime.properties: |
+    druid.service=druid/router
+    druid.plaintextPort=8888
+    druid.router.http.numConnections=200
+    druid.router.http.readTimeout=PT5M
+    druid.router.http.numMaxThreads=100
+    druid.server.http.numThreads=100
+    druid.router.defaultBrokerServiceName=druid/broker
+    druid.router.coordinatorServiceName=druid/coordinator
+    druid.router.managementProxy.enabled=true
+  jvm.config: |-
+    -server
+    -Duser.timezone=UTC
+    -Dfile.encoding=UTF-8
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+UseG1GC
+    -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+    -Djava.io.tmpdir=var/tmp
+    -XX:ActiveProcessorCount=4
+    -Xms256m
+    -Xmx256m
+    -XX:MaxDirectMemorySize=128m
+  log4j2.xml: |
+    <?xml version="1.0" encoding="UTF-8" ?>
+    <Configuration status="WARN">
+      <Appenders>
+        <Console name="Console" target="SYSTEM_OUT">
+          <PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/>
+        </Console>
+      </Appenders>
+      <Loggers>
+        <Root level="info">
+          <AppenderRef ref="Console"/>
+        </Root>
+      </Loggers>
+    </Configuration>

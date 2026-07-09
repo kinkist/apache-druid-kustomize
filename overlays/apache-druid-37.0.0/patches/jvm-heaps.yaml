@@ -1,0 +1,185 @@
+# ──────────────────────────────────────────────────────────────────
+# JVM heap size patch (per component)
+#
+# -Xms = -Xmx recommended (minimizes GC pause)
+# -XX:MaxDirectMemorySize = off-heap memory (processing buffer + Netty IO)
+#   MaxDirectMemorySize is directly coupled to processing settings in runtime.properties
+#
+#   Actual direct memory usage = (numThreads + numMergeBuffers) × sizeBytes + Netty IO (~50~80MB)
+#
+#   Per-component processing settings → direct memory usage:
+#   Broker    : (1+2) × 50MB  = 150MB + ~50MB ≈ 200MB  → MaxDirect 256m ✅
+#   Historical: (1+2) × 50MB  = 150MB + ~50MB ≈ 200MB  → MaxDirect 256m ✅
+#   Indexer   : (2+2) × 100MB = 400MB + ~80MB ≈ 480MB  → MaxDirect 512m ✅ (headroom ~32MB)
+#
+#   ※ When increasing numThreads or sizeBytes, always recalculate MaxDirectMemorySize
+#      If insufficient → java.lang.OutOfMemoryError: Direct buffer memory
+#
+# ┌─ Container memory limit formula (must align with k8s-resources.yaml) ──
+# │
+# │  Actual JVM memory = Xmx + MaxDirectMemorySize + JVM overhead
+# │                                                  (metaspace,
+# │                                                   code cache,
+# │                                                   thread stack,
+# │                                                   GC overhead)
+# │                                                  ≈ 200~350Mi
+# │
+# │  container limit >= Xmx + MaxDirectMemorySize + ~300Mi
+# │
+# │  If limit is too low: Linux OOM Killer forcibly terminates the process
+# │    → Pod status: OOMKilled (check with kubectl describe pod)
+# │    → -XX:+ExitOnOutOfMemoryError only handles JVM heap OOM;
+# │       it cannot prevent container-level OOM Killer
+# │
+# │  Per-component calculation:
+# │  Coordinator : 256m + 256m + ~300Mi ≈  812Mi → limit 1Gi    ✅
+# │  Overlord    : 256m + 256m + ~300Mi ≈  812Mi → limit 1Gi    ✅
+# │  Broker      : 512m + 256m + ~300Mi ≈ 1068Mi → limit 1Gi    ⚠️ barely fits
+# │  Historical  : 512m + 256m + ~300Mi ≈ 1068Mi → limit 1536Mi ✅
+# │  Indexer     : 2048m + 512m + ~300Mi ≈ 2860Mi → limit 2Gi  ⚠️ exceeds formula
+# │  Router      : 256m + 128m + ~300Mi ≈  684Mi → limit 512Mi ⚠️ insufficient
+# │
+# │  ※ Indexer warning: Xmx(2048Mi) + MaxDirect(512Mi) = 2560Mi already
+# │     exceeds limit(2Gi=2048Mi) on paper.
+# │     Operable in practice since heap and direct memory rarely peak
+# │     simultaneously, but OOMKilled risk increases with higher
+# │     worker.capacity or large segment processing.
+# │     Recommended: raise limit to 3Gi or above.
+# └────────────────────────────────────────────────────────────────
+#
+#   → memory limit = Xmx + MaxDirectMemorySize + ~200~300Mi headroom
+#
+# -Djava.io.tmpdir=var/tmp  ← important setting tied to volume mount
+#   Druid process working directory: /opt/druid/
+#   Relative path var/tmp → resolves to: /opt/druid/var/tmp
+#
+#   Volume mount structure:
+#     volume: data (emptyDir or PVC)
+#     mountPath: /opt/druid/var          ← volume root
+#                /opt/druid/var/tmp      ← tmpdir (inside volume)
+#                /opt/druid/var/druid/segments  ← segment cache
+#                /opt/druid/var/druid/task/     ← task temp files
+#
+#   Why tmpdir points inside the volume:
+#     1. Avoids ephemeral storage limit on the container root filesystem (/tmp)
+#     2. When using PVC, task temp files use PVC space (stable)
+#     3. When using emptyDir, node disk is used (not container memory)
+#
+#   ※ tmpdir path remains valid when switching base(emptyDir) → PVC
+#      because mountPath(/opt/druid/var) stays the same
+# ──────────────────────────────────────────────────────────────────
+
+# Coordinator: lightweight metadata management, 256m is sufficient
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-coordinator-config
+data:
+  jvm.config: |-
+    -server
+    -Duser.timezone=UTC
+    -Dfile.encoding=UTF-8
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+UseG1GC
+    -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+    -Djava.io.tmpdir=var/tmp
+    -Xms256m
+    -Xmx256m
+    -XX:MaxDirectMemorySize=256m
+
+---
+# Overlord: task scheduling, 256m is sufficient
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-overlord-config
+data:
+  jvm.config: |-
+    -server
+    -Duser.timezone=UTC
+    -Dfile.encoding=UTF-8
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+UseG1GC
+    -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+    -Djava.io.tmpdir=var/tmp
+    -Xms256m
+    -Xmx256m
+    -XX:MaxDirectMemorySize=256m
+
+---
+# Broker: query merging, 512m (increase for complex aggregation queries)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-broker-config
+data:
+  jvm.config: |-
+    -server
+    -Duser.timezone=UTC
+    -Dfile.encoding=UTF-8
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+UseG1GC
+    -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+    -Djava.io.tmpdir=var/tmp
+    -Xms512m
+    -Xmx512m
+    -XX:MaxDirectMemorySize=256m
+
+---
+# Historical: segment load/query, 512m (increase as segment count grows)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-historical-config
+data:
+  jvm.config: |-
+    -server
+    -Duser.timezone=UTC
+    -Dfile.encoding=UTF-8
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+UseG1GC
+    -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+    -Djava.io.tmpdir=var/tmp
+    -Xms512m
+    -Xmx512m
+    -XX:MaxDirectMemorySize=256m
+
+---
+# Indexer: Kafka ingest + task execution, 2g (scales with concurrent task count)
+# Minimum 1g recommended when worker.capacity=3
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-indexer-config
+data:
+  jvm.config: |-
+    -server
+    -Duser.timezone=UTC
+    -Dfile.encoding=UTF-8
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+UseG1GC
+    -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+    -Djava.io.tmpdir=var/tmp
+    -Xms512m
+    -Xmx2g
+    -XX:MaxDirectMemorySize=512m
+
+---
+# Router: UI + query routing, 256m is sufficient
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-router-config
+data:
+  jvm.config: |-
+    -server
+    -Duser.timezone=UTC
+    -Dfile.encoding=UTF-8
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+UseG1GC
+    -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+    -Djava.io.tmpdir=var/tmp
+    -XX:ActiveProcessorCount=4
+    -Xms256m
+    -Xmx256m
+    -XX:MaxDirectMemorySize=128m

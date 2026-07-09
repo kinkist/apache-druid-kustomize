@@ -1,0 +1,11 @@
+# Inject AWS_REGION env into all Druid StatefulSets
+# Required when using S3 or MinIO — enable together with druid-common-config-with-minio.yaml
+# or druid-common-config-with-aws-s3.yaml
+#
+# For MinIO: any non-empty value works (endpoint is set explicitly via druid.s3.endpoint.url)
+# For AWS S3: set value to the region where your bucket lives (e.g. ap-northeast-2)
+- op: add
+  path: /spec/template/spec/containers/0/env/-
+  value:
+    name: AWS_REGION
+    value: "us-east-1"

@@ -1,0 +1,56 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-indexer-config
+data:
+  runtime.properties: |
+    druid.service=druid/indexer
+    druid.plaintextPort=8091
+    druid.worker.capacity=3
+    druid.worker.category=default
+    druid.indexer.task.baseDir=/opt/druid/var/tmp
+    druid.indexer.task.baseTaskDir=/opt/druid/var/druid/task
+    druid.processing.buffer.sizeBytes=100000000
+    druid.processing.numThreads=2
+    druid.processing.numMergeBuffers=2
+  jvm.config: |-
+    -server
+    -Duser.timezone=UTC
+    -Dfile.encoding=UTF-8
+    -XX:+ExitOnOutOfMemoryError
+    -XX:+UseG1GC
+    -Djava.util.logging.manager=org.apache.logging.log4j.jul.LogManager
+    -Djava.io.tmpdir=var/tmp
+    -Xms512m
+    -Xmx2g
+    -XX:MaxDirectMemorySize=512m
+  log4j2.xml: |
+    <?xml version="1.0" encoding="UTF-8" ?>
+    <Configuration status="WARN">
+      <Appenders>
+        <Console name="Console" target="SYSTEM_OUT">
+          <PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/>
+        </Console>
+        <Routing name="TaskRouting">
+          <Routes pattern="$${ctx:task.log.id}">
+            <Route key="">
+              <Null name="Null"/>
+            </Route>
+            <Route>
+              <File name="TaskFile-${ctx:task.log.id}"
+                    fileName="${ctx:task.log.file}"
+                    createOnDemand="true"
+                    append="true">
+                <PatternLayout pattern="%d{ISO8601} %p [%t] %c - %m%n"/>
+              </File>
+            </Route>
+          </Routes>
+        </Routing>
+      </Appenders>
+      <Loggers>
+        <Root level="info">
+          <AppenderRef ref="Console"/>
+          <AppenderRef ref="TaskRouting"/>
+        </Root>
+      </Loggers>
+    </Configuration>

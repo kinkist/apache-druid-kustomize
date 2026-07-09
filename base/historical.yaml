@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-historicals
+spec:
+  serviceName: druid-historicals
+  replicas: 1
+  selector:
+    matchLabels:
+      app: druid
+      nodeType: historical
+  template:
+    metadata:
+      labels:
+        app: druid
+        nodeType: historical
+      annotations:
+        druid.k8s.enablePatching: "true"
+    spec:
+      serviceAccountName: druid-cluster
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: druid-historicals
+          image: apache/druid
+          command: ["/druid.sh", "historical"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: druid_host
+              value: "$(POD_IP)"
+          ports:
+            - name: druid-port
+              containerPort: 8083
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              cpu: 1
+              memory: 1536Mi
+          livenessProbe:
+            httpGet:
+              path: /status/health
+              port: 8083
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 30
+            failureThreshold: 20
+          readinessProbe:
+            httpGet:
+              path: /druid/historical/v1/loadstatus
+              port: 8083
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 30
+            failureThreshold: 10
+          volumeMounts:
+            - name: common-config
+              mountPath: /opt/druid/conf/druid/cluster/_common
+            - name: node-config
+              mountPath: /opt/druid/conf/druid/cluster/data/historical
+            - name: data
+              mountPath: /opt/druid/var
+      volumes:
+        - name: common-config
+          configMap:
+            name: druid-common-config
+        - name: node-config
+          configMap:
+            name: druid-historical-config
+        - name: data
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: druid-historicals
+spec:
+  selector:
+    app: druid
+    nodeType: historical
+  ports:
+    - port: 8083
+      targetPort: 8083

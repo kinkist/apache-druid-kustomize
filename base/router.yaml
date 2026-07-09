@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-routers
+spec:
+  serviceName: druid-routers
+  replicas: 1
+  selector:
+    matchLabels:
+      app: druid
+      nodeType: router
+  template:
+    metadata:
+      labels:
+        app: druid
+        nodeType: router
+      annotations:
+        druid.k8s.enablePatching: "true"
+    spec:
+      serviceAccountName: druid-cluster
+      securityContext:
+        fsGroup: 1000
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: druid-routers
+          image: apache/druid
+          command: ["/druid.sh", "router"]
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: druid_host
+              value: "$(POD_IP)"
+          ports:
+            - name: druid-port
+              containerPort: 8888
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /status/health
+              port: 8888
+            initialDelaySeconds: 120
+            periodSeconds: 15
+            timeoutSeconds: 30
+            failureThreshold: 20
+          readinessProbe:
+            httpGet:
+              path: /status/health
+              port: 8888
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 30
+            failureThreshold: 10
+          volumeMounts:
+            - name: common-config
+              mountPath: /opt/druid/conf/druid/cluster/_common
+            - name: node-config
+              mountPath: /opt/druid/conf/druid/cluster/query/router
+            - name: data
+              mountPath: /opt/druid/var
+      volumes:
+        - name: common-config
+          configMap:
+            name: druid-common-config
+        - name: node-config
+          configMap:
+            name: druid-router-config
+        - name: data
+          emptyDir: {}
+---
+# Internal ClusterIP service
+apiVersion: v1
+kind: Service
+metadata:
+  name: druid-routers
+spec:
+  selector:
+    app: druid
+    nodeType: router
+  ports:
+    - port: 8888
+      targetPort: 8888

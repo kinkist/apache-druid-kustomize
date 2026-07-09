@@ -1,0 +1,54 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: default
+
+resources:
+  - ../../base
+
+# ── Druid image version ────────────────────────────────────────────
+# Manage the overlay directory name (apache-druid-37.0.0) and newTag together.
+# To upgrade: copy this overlay directory and change only newTag.
+images:
+  - name: apache/druid
+    newTag: "37.0.0"
+
+# PostgreSQL credentials (loaded from postgres.env file)
+# postgres.env is gitignored — see postgres.env.example
+secretGenerator:
+  - name: druid-postgresql-secret
+    behavior: replace
+    envs:
+      - postgres.env
+    options:
+      disableNameSuffixHash: true
+
+# ── PVC / Router ──────────────────────────────────────────────────
+components:
+  - ../../components/pvc               # Use PVC (replaces emptyDir with PVC)
+  - ../../components/router-external   # LoadBalancer service
+
+# ── Tuning + Storage patches ───────────────────────────────────────
+# base/components are kept as read-only references.
+# All environment-specific config lives here.
+patches:
+  - path: patches/replicas.yaml              # Indexer replicas (HA=2)
+  - path: patches/jvm-heaps.yaml             # JVM heap sizes
+  - path: patches/k8s-resources.yaml         # K8s requests / limits
+  - path: patches/overlord-configmap-patch.yaml  # Task history: local → metadata (PostgreSQL)
+  - path: patches/pvc-patch.yaml             # PVC storageClassName and sizes
+
+  # ── Deep storage — enable exactly one ────────────────────────────
+  - path: patches/druid-common-config-with-minio.yaml       # ✅ MinIO (currently active)
+  # - path: patches/druid-common-config-with-aws-s3.yaml    # AWS S3
+  # - path: patches/druid-common-config-with-azure.yaml     # Azure Blob Storage
+  # - path: patches/druid-common-config-with-gcs.yaml       # Google Cloud Storage
+  # - path: patches/druid-common-config-with-hdfs.yaml      # Apache HDFS
+  # - path: patches/druid-common-config-with-aliyun-oss.yaml  # Aliyun OSS (community)
+  # - path: patches/druid-common-config-with-cloudfiles.yaml  # Rackspace Cloudfiles (community)
+  # - path: patches/druid-common-config-with-cassandra.yaml   # Cassandra (community)
+
+  # ── AWS_REGION env — enable when using S3 or MinIO ───────────────
+  - path: patches/statefulsets-with-aws-region.yaml
+    target:
+      kind: StatefulSet

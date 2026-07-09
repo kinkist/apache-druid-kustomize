@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: druid-router-external
+spec:
+  type: LoadBalancer
+  selector:
+    app: druid
+    nodeType: router
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8888

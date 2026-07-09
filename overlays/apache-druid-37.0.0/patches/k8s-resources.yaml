@@ -1,0 +1,156 @@
+# ──────────────────────────────────────────────────────────────────
+# K8s resource patch (requests / limits)
+#
+# requests : Used by the Kubernetes scheduler to place pods on nodes.
+#            If actual usage < requests: wasted; if > requests: node overload.
+# limits   : Maximum allowed per container. If exceeded, Linux OOM Killer terminates.
+#            → Pod status shown as OOMKilled
+#
+# ┌─ memory limits formula (must align with jvm-heaps.yaml) ──────────
+# │  limits >= Xmx + MaxDirectMemorySize + JVM overhead(~300Mi)
+# │
+# │  Component    Xmx    Direct  overhead  total   limit   status
+# │  ─────────────────────────────────────────────────────────────
+# │  Coordinator  256m  + 256m + ~300Mi = ~812Mi   1Gi    ✅ headroom 212Mi
+# │  Overlord     256m  + 256m + ~300Mi = ~812Mi   1Gi    ✅ headroom 212Mi
+# │  Broker       512m  + 256m + ~300Mi = ~1068Mi  1Gi    ⚠️ barely fits (-44Mi)
+# │  Historical   512m  + 256m + ~300Mi = ~1068Mi  1536Mi ✅ headroom 468Mi
+# │  Indexer     2048m  + 512m + ~300Mi = ~2860Mi  2Gi    ⚠️ exceeds formula (-812Mi)
+# │  Router       256m  + 128m + ~300Mi = ~684Mi   512Mi  ⚠️ insufficient (-172Mi)
+# │
+# │  ⚠️  Broker / Router: near formula limit; OOMKilled risk under high query load.
+# │      Recommended: Broker → 1536Mi, Router → 768Mi
+# │
+# │  ⚠️  Indexer: Xmx(2048Mi) + Direct(512Mi) alone already exceeds limit(2Gi).
+# │      Operable since heap and direct memory rarely peak simultaneously.
+# │      OOMKilled risk when increasing worker.capacity or processing large segments.
+# │      Safe threshold: limit 3Gi or above (adjust after checking node memory)
+# └────────────────────────────────────────────────────────────────
+#
+# How to detect OOMKilled:
+#   kubectl describe pod <pod> | grep -A5 "Last State"
+#   kubectl get pod -o json | python3 -c "
+#     import json,sys
+#     for p in json.load(sys.stdin)['items']:
+#       for c in p.get('status',{}).get('containerStatuses',[]):
+#         t = c.get('lastState',{}).get('terminated',{})
+#         if t.get('reason')=='OOMKilled':
+#           print(p['metadata']['name'], t)"
+# ──────────────────────────────────────────────────────────────────
+
+# Coordinator: Xmx256m + Direct256m + overhead~300Mi → 1Gi limit ✅
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-coordinators
+spec:
+  template:
+    spec:
+      containers:
+        - name: druid-coordinators
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+---
+# Overlord: Xmx256m + Direct256m + overhead~300Mi → 1Gi limit ✅
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-overlords
+spec:
+  template:
+    spec:
+      containers:
+        - name: druid-overlords
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+---
+# Broker: Xmx512m + Direct256m + overhead~300Mi = ~1068Mi → limit 1Gi ⚠️ barely fits; recommend 1536Mi under high query load
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-brokers
+spec:
+  template:
+    spec:
+      containers:
+        - name: druid-brokers
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+
+---
+# Historical: Xmx512m + Direct256m + overhead~300Mi = ~1068Mi → limit 1536Mi ✅ headroom 468Mi
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-historicals
+spec:
+  template:
+    spec:
+      containers:
+        - name: druid-historicals
+          resources:
+            requests:
+              cpu: 250m
+              memory: 768Mi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+
+---
+# Indexer: Xmx2048m + Direct512m + overhead~300Mi = ~2860Mi → limit 2Gi ⚠️ exceeds formula
+# Current limit(2Gi) is already less than Xmx+Direct(2560Mi).
+# Operable since heap and direct rarely peak simultaneously; OOMKilled risk under load.
+# Recommended: raise limit to 3Gi or above.
+# With replicas=2: need 3Gi × 2 = 6Gi available per node
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-indexers
+spec:
+  template:
+    spec:
+      containers:
+        - name: druid-indexers
+          resources:
+            requests:
+              cpu: 300m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+
+---
+# Router: Xmx256m + Direct128m + overhead~300Mi = ~684Mi → limit 512Mi ⚠️ insufficient; recommend 768Mi
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-routers
+spec:
+  template:
+    spec:
+      containers:
+        - name: druid-routers
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

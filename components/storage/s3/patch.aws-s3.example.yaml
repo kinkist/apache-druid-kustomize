@@ -1,0 +1,64 @@
+# AWS S3 example — copy this file to patch.yaml and fill in your values
+#
+# Required changes from MinIO defaults:
+#   - Remove druid.s3.endpoint.url       (AWS SDK resolves the endpoint automatically)
+#   - Set druid.s3.enablePathStyleAccess=false
+#   - Set druid.storage.bucket to your S3 bucket name
+#   - Set druid.s3.accessKey / secretKey to your IAM credentials
+#     (IAM Role on EC2/EKS is preferred over static keys)
+#   - Set AWS_REGION env in components/storage/s3/statefulset-env-patch.yaml
+#     to the region where your bucket lives (e.g. ap-northeast-2)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-common-config
+data:
+  common.runtime.properties: |
+    # ZooKeeper-less K8s discovery
+    druid.zk.service.enabled=false
+    druid.discovery.type=k8s
+    druid.discovery.k8s.clusterIdentifier=druid-default
+    druid.serverview.type=http
+    druid.coordinator.loadqueuepeon.type=http
+    druid.indexer.runner.type=httpRemote
+
+    # Metadata storage (PostgreSQL)
+    druid.metadata.storage.type=postgresql
+    druid.metadata.storage.connector.connectURI=jdbc:postgresql://druid-postgresql:5432/druid
+    druid.metadata.storage.connector.user=druid
+    druid.metadata.storage.connector.password=druid
+    druid.metadata.storage.connector.createTables=true
+
+    # Deep storage — AWS S3
+    druid.storage.type=s3
+    druid.storage.bucket=APACHE-DRUID-BUCKET
+    druid.storage.baseKey=segments
+    druid.s3.accessKey=AWS_ACCESSKEY
+    druid.s3.secretKey=AWS_SECRETKEY
+    druid.s3.enablePathStyleAccess=false
+    druid.s3.forceGlobalBucketAccessEnabled=false
+
+    # Extensions
+    druid.extensions.loadList=["druid-kafka-indexing-service","druid-kubernetes-extensions","postgresql-metadata-storage","druid-datasketches","druid-basic-security","druid-bloom-filter","druid-lookups-cached-global","druid-lookups-cached-single","druid-stats","prometheus-emitter","druid-multi-stage-query","druid-s3-extensions"]
+
+    # Service discovery
+    druid.selectors.indexing.serviceName=druid/overlord
+    druid.selectors.coordinator.serviceName=druid/coordinator
+
+    # Indexing logs — S3
+    druid.indexer.logs.type=s3
+    druid.indexer.logs.s3Bucket=APACHE-DRUID-BUCKET
+    druid.indexer.logs.s3Prefix=indexing-logs
+
+    # SQL
+    druid.sql.enable=true
+    druid.lookup.enableLookupSyncOnStartup=false
+
+    # Emitter
+    druid.emitter=prometheus
+    druid.emitter.prometheus.port=9090
+    druid.emitter.prometheus.strategy=exporter
+
+    druid.startup.logging.logProperties=true
+    druid.k8s.apiClientConfig.watchReconnectLimit=-1
+    druid.k8s.apiClientConfig.watchReconnectInterval=1000

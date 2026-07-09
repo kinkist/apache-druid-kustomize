@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: druid-overlord-config
+data:
+  runtime.properties: |
+    druid.service=druid/overlord
+    druid.plaintextPort=8090
+    druid.indexer.queue.startDelay=PT30S
+    druid.indexer.runner.type=httpRemote
+    druid.indexer.storage.type=metadata
+    druid.indexer.storage.remote.maxTaskStatusCount=10
+    druid.server.http.numThreads=60

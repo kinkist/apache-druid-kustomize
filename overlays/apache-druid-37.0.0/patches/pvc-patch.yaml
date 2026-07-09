@@ -1,0 +1,107 @@
+# PVC size override
+# Overrides storage sizes from components/pvc/kustomization.yaml without modifying the component.
+#
+# storageClassName is omitted here — components/pvc sets it to "gp2" (cluster default).
+# To use a different StorageClass, add: storageClassName: <name>
+#   gp2         — NFS (nfs-subdir-external-provisioner) ← cluster default
+#   nfs-client  — NFS (nfs-subdir-external-provisioner)
+#   nfs-csi     — NFS (nfs.csi.k8s.io)
+#   local-path  — local disk (Rancher local-path-provisioner)
+#   longhorn    — distributed block storage (Longhorn)
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-postgresql
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        resources:
+          requests:
+            storage: 8Gi
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-coordinators
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        resources:
+          requests:
+            storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-overlords
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        resources:
+          requests:
+            storage: 5Gi
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-brokers
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        resources:
+          requests:
+            storage: 10Gi
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-historicals
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        resources:
+          requests:
+            storage: 10Gi   # segment cache — increase if storing many segments locally
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-indexers
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        resources:
+          requests:
+            storage: 10Gi   # task temp files — increase for large segment builds
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: druid-routers
+spec:
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        resources:
+          requests:
+            storage: 5Gi
