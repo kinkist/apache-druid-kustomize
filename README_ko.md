@@ -544,7 +544,7 @@ kubectl port-forward svc/druid-routers 8888:8888
 ### Druid 버전 업그레이드
 
 overlay 디렉토리명과 `kustomization.yaml`의 `images.newTag`가 버전을 함께 관리합니다.  
-base의 StatefulSet은 `image: apache/druid` (태그 없음)로 선언되어 있고, overlay가 태그를 주입합니다.
+base의 StatefulSet은 `image: apache/druid:37.0.0` (태그 포함)으로 선언되어 있으며, overlay의 `images.newTag`가 이를 덮어씁니다 — 업그레이드 시 overlay의 `newTag`만 변경하면 됩니다.
 
 ```bash
 # 새 버전 overlay 생성 (예: 38.0.0)
